@@ -7,3 +7,4 @@ import LeanTLS.Crypto.X25519
 import LeanTLS.KeySchedule
 import LeanTLS.Record
 import LeanTLS.Handshake
+import LeanTLS.Connection
