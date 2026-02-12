@@ -4,3 +4,6 @@ import LeanTLS.Crypto.HKDF
 import LeanTLS.Crypto.AES
 import LeanTLS.Crypto.GCM
 import LeanTLS.Crypto.X25519
+import LeanTLS.KeySchedule
+import LeanTLS.Record
+import LeanTLS.Handshake

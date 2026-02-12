@@ -27,6 +27,18 @@ def main : IO Unit := do
   let hkdfOk ← LeanTLS.Crypto.HKDF.runTests
   if !hkdfOk then allOk := false
 
+  IO.println "Running TLS Record layer tests..."
+  let recordOk ← LeanTLS.Record.runTests
+  if !recordOk then allOk := false
+
+  IO.println "Running TLS Handshake tests..."
+  let hsOk ← LeanTLS.Handshake.runTests
+  if !hsOk then allOk := false
+
+  IO.println "Running TLS Key Schedule tests..."
+  let ksOk ← LeanTLS.KeySchedule.runTests
+  if !ksOk then allOk := false
+
   if allOk then
     IO.println "All tests passed!"
   else
