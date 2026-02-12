@@ -1,0 +1,5 @@
+{"log":
+ [{"message":
+   ".> MACOSX_DEPLOYMENT_TARGET=99.0 /Users/kaito2/.elan/toolchains/leanprover--lean4---v4.16.0/bin/clang -o ././.lake/build/bin/tests ././.lake/build/ir/Main.c.o.export ././.lake/build/ir/LeanTLS/Crypto/SHA256.c.o.export ././.lake/build/ir/LeanTLS/Crypto/HMAC.c.o.export ././.lake/build/ir/LeanTLS/Crypto/HKDF.c.o.export ././.lake/build/ir/LeanTLS/Crypto/AES.c.o.export ././.lake/build/ir/LeanTLS/Crypto/GCM.c.o.export ././.lake/build/ir/LeanTLS/Crypto/X25519.c.o.export ././.lake/build/ir/LeanTLS/KeySchedule.c.o.export ././.lake/build/ir/LeanTLS/Record.c.o.export ././.lake/build/ir/LeanTLS/Handshake.c.o.export ././.lake/build/ir/LeanTLS/Connection.c.o.export ././.lake/build/ir/LeanTLS.c.o.export --sysroot /Users/kaito2/.elan/toolchains/leanprover--lean4---v4.16.0 -L /Users/kaito2/.elan/toolchains/leanprover--lean4---v4.16.0/lib -L /Users/kaito2/.elan/toolchains/leanprover--lean4---v4.16.0/lib/libc -fuse-ld=lld -L /Users/kaito2/.elan/toolchains/leanprover--lean4---v4.16.0/lib/lean -lleancpp -lInit -lStd -lLean -lleanrt -lc++ -lLake -lgmp -luv",
+   "level": "trace"}],
+ "depHash": "3143456991974277289"}

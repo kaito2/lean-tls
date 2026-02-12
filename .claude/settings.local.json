@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(lake build:*)",
+      "Bash(.lake/build/bin/tests:*)",
+      "Bash(lake env lean:*)",
+      "Bash(lake exe tests:*)",
+      "Bash(python3:*)",
+      "WebFetch(domain:www.rfc-editor.org)",
+      "Bash(lake clean:*)",
+      "Bash(./.lake/build/bin/tests:*)",
+      "Bash(/tmp/test_handshake.lean << 'EOF'\nimport LeanTLS\n\ndef main : IO Unit := do\n  IO.println \"Running Handshake tests...\"\n  let ok ← LeanTLS.Handshake.runTests\n  if ok then\n    IO.println \"All Handshake tests passed!\"\n  else\n    IO.println \"Some Handshake tests failed!\"\n    IO.Process.exit 1\nEOF)",
+      "Bash(LEAN_PATH=/Users/kaito2/tmp/lean-tls/.lake/build/lib /Users/kaito2/.elan/toolchains/leanprover--lean4---v4.16.0/bin/lean:*)"
+    ]
+  }
+}

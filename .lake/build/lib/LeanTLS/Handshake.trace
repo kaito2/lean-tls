@@ -1,0 +1,5 @@
+{"log":
+ [{"message":
+   ".> LEAN_PATH=././.lake/build/lib DYLD_LIBRARY_PATH= /Users/kaito2/.elan/toolchains/leanprover--lean4---v4.16.0/bin/lean -DautoImplicit=false ././././LeanTLS/Handshake.lean -R ./././. -o ././.lake/build/lib/LeanTLS/Handshake.olean -i ././.lake/build/lib/LeanTLS/Handshake.ilean -c ././.lake/build/ir/LeanTLS/Handshake.c --json",
+   "level": "trace"}],
+ "depHash": "11859471755039006775"}
