@@ -8,7 +8,7 @@ Pure Lean 4 implementation of a TLS 1.3 client library. No C FFI or external dep
 - **Client only** (no server implementation)
 - **Cipher suite**: `TLS_AES_128_GCM_SHA256`
 - **Key exchange**: X25519 (ECDHE)
-- **Certificate verification**: skipped (designed as a future extension point)
+- **Certificate verification**: RSA-PSS (rsa_pss_rsae_sha256) signature verification, hostname matching (SAN/CN)
 - **Toolchain**: `leanprover/lean4:v4.16.0`
 
 ## Project Structure
@@ -21,7 +21,11 @@ LeanTLS/
 │   ├── HKDF.lean        # HKDF Extract + Expand (RFC 5869)
 │   ├── AES.lean         # AES-128 block cipher (FIPS 197)
 │   ├── GCM.lean         # AES-128-GCM AEAD (NIST SP 800-38D)
-│   └── X25519.lean      # X25519 Diffie-Hellman (RFC 7748)
+│   ├── X25519.lean      # X25519 Diffie-Hellman (RFC 7748)
+│   └── RSA.lean         # RSA-PSS signature verification (RFC 8017)
+├── ASN1.lean            # ASN.1/DER parser
+├── X509.lean            # X.509 certificate parser
+├── CertVerify.lean      # TLS 1.3 certificate verification (RFC 8446 Section 4.4)
 ├── Record.lean          # TLS record layer (encrypt/decrypt)
 ├── Handshake.lean       # Handshake messages (ClientHello, ServerHello, Finished)
 ├── KeySchedule.lean     # TLS 1.3 key schedule (RFC 8446 Section 7.1)
@@ -114,6 +118,29 @@ Test coverage:
 | TLS Record | 16 | Encode/decode, nonce, encrypt/decrypt |
 | TLS Handshake | 5 | Roundtrip, ClientHello, transcript, Finished |
 | Key Schedule | 9 | RFC 8448 |
+| RSA-PSS | 5 | OpenSSL generated test vector |
+| ASN.1/DER | 4 | Manual DER construction |
+| X.509 | 7 | mozilla.org real certificate |
+| CertVerify | 5 | Message parsing, hostname matching |
+
+### Integration Test
+
+```sh
+lake build integration-test && .lake/build/bin/integration-test
+```
+
+mozilla.org に対して TLS 1.3 ハンドシェイク（証明書検証有効）を実行し、HTTP レスポンスを検証します。
+
+## Future Work
+
+- **ECDSA (P-256) 署名検証** — `ecdsa_secp256r1_sha256` (0x0403) 対応。P-256 楕円曲線演算の実装が必要
+- **証明書チェーン検証** — 中間 CA → ルート CA への信頼チェーン検証。システムのルート CA ストア読み込みが必要
+- **証明書の有効期限チェック** — ASN.1 UTCTime / GeneralizedTime のパースと現在時刻との比較
+- **CRL / OCSP** — 証明書失効確認
+- **AES-256-GCM** — `TLS_AES_256_GCM_SHA384` cipher suite 対応
+- **TLS 1.3 セッション再開** — PSK (Pre-Shared Key) によるセッション再開 (0-RTT)
+- **クライアント証明書** — mTLS (mutual TLS) 対応
+- **形式検証** — Lean の証明機能を活用した暗号プリミティブの正当性証明
 
 ## References
 
@@ -123,6 +150,8 @@ Test coverage:
 - [RFC 2104](https://datatracker.ietf.org/doc/html/rfc2104) - HMAC
 - [FIPS 197](https://csrc.nist.gov/publications/detail/fips/197/final) - AES
 - [NIST SP 800-38D](https://csrc.nist.gov/publications/detail/sp/800-38d/final) - GCM
+- [RFC 8017](https://datatracker.ietf.org/doc/html/rfc8017) - PKCS #1 (RSA-PSS)
+- [RFC 6125](https://datatracker.ietf.org/doc/html/rfc6125) - Hostname verification
 - [RFC 8448](https://datatracker.ietf.org/doc/html/rfc8448) - TLS 1.3 test vectors
 
 ## License
