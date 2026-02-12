@@ -1,5 +1,0 @@
-{"log":
- [{"message":
-   ".> LEAN_PATH=././.lake/build/lib DYLD_LIBRARY_PATH= /Users/kaito2/.elan/toolchains/leanprover--lean4---v4.16.0/bin/lean -DautoImplicit=false ././././LeanTLS/Crypto/HKDF.lean -R ./././. -o ././.lake/build/lib/LeanTLS/Crypto/HKDF.olean -i ././.lake/build/lib/LeanTLS/Crypto/HKDF.ilean -c ././.lake/build/ir/LeanTLS/Crypto/HKDF.c --json",
-   "level": "trace"}],
- "depHash": "481192025389139899"}

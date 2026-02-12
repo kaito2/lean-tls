@@ -1,5 +1,0 @@
-{"log":
- [{"message":
-   ".> LEAN_PATH=././.lake/build/lib DYLD_LIBRARY_PATH= /Users/kaito2/.elan/toolchains/leanprover--lean4---v4.16.0/bin/lean -DautoImplicit=false ././././LeanTLS/Crypto/X25519.lean -R ./././. -o ././.lake/build/lib/LeanTLS/Crypto/X25519.olean -i ././.lake/build/lib/LeanTLS/Crypto/X25519.ilean -c ././.lake/build/ir/LeanTLS/Crypto/X25519.c --json",
-   "level": "trace"}],
- "depHash": "15317091901522617415"}
