@@ -45,7 +45,8 @@ def main : IO Unit := do
   IO.println "=== TLS 1.3 Integration Test ==="
   IO.println ""
 
-  let host := "example.com"
+  -- Use mozilla.org which has an RSA certificate (supports RSA-PSS verification)
+  let host := "mozilla.org"
   let port := "443"
 
   -- Step 1: Establish raw TCP connection via netcat
@@ -53,10 +54,10 @@ def main : IO Unit := do
   let (stream, cleanup) ← mkNetcatStream host port
   IO.println s!"[1] TCP connection established."
 
-  -- Step 2: Perform TLS 1.3 handshake
-  IO.println "[2] Starting TLS 1.3 handshake ..."
-  let conn ← LeanTLS.TlsConnection.connect stream host
-  IO.println "[2] TLS 1.3 handshake completed successfully!"
+  -- Step 2: Perform TLS 1.3 handshake WITH certificate verification
+  IO.println "[2] Starting TLS 1.3 handshake (certificate verification ENABLED) ..."
+  let conn ← LeanTLS.TlsConnection.connect stream host { skipCertVerify := false }
+  IO.println "[2] TLS 1.3 handshake with certificate verification completed successfully!"
 
   -- Step 3: Send HTTP GET request
   let httpRequest := s!"GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"

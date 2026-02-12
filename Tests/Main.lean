@@ -39,6 +39,22 @@ def main : IO Unit := do
   let ksOk ← LeanTLS.KeySchedule.runTests
   if !ksOk then allOk := false
 
+  IO.println "Running RSA-PSS tests..."
+  let rsaOk ← LeanTLS.Crypto.RSA.runTests
+  if !rsaOk then allOk := false
+
+  IO.println "Running ASN1 tests..."
+  let asn1Ok ← LeanTLS.ASN1.runTests
+  if !asn1Ok then allOk := false
+
+  IO.println "Running X509 tests..."
+  let x509Ok ← LeanTLS.X509.runTests
+  if !x509Ok then allOk := false
+
+  IO.println "Running CertVerify tests..."
+  let cvOk ← LeanTLS.CertVerify.runTests
+  if !cvOk then allOk := false
+
   if allOk then
     IO.println "All tests passed!"
   else

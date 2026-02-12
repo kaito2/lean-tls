@@ -4,6 +4,7 @@ import LeanTLS.KeySchedule
 import LeanTLS.Errors
 import LeanTLS.Crypto.X25519
 import LeanTLS.Crypto.SHA256
+import LeanTLS.CertVerify
 
 /-!
 # TLS 1.3 Connection (Integration API)
@@ -217,7 +218,7 @@ namespace TlsConnection
     8. Send client Finished
     9. Derive application traffic keys
     10. Return connection ready for application data -/
-def connect (stream : IOStream) (hostname : String) (_config : TlsConfig := {}) : IO TlsConnection := do
+def connect (stream : IOStream) (hostname : String) (config : TlsConfig := {}) : IO TlsConnection := do
   -- -----------------------------------------------------------------------
   -- Step 1: Generate random bytes for client_random, session_id, and X25519 private key
   -- -----------------------------------------------------------------------
@@ -393,6 +394,27 @@ def connect (stream : IOStream) (hostname : String) (_config : TlsConfig := {}) 
   if finType != .finished then
     throwTlsError (.unexpectedMessage "Finished" s!"{repr finType}")
 
+  -- Certificate verification (if enabled)
+  if !config.skipCertVerify then
+    -- The transcript for CertificateVerify verification includes:
+    -- ClientHello, ServerHello, EncryptedExtensions, Certificate
+    -- (but NOT CertificateVerify itself)
+    let transcriptForCV := transcript.push eeRaw |>.push certRaw
+    let transcriptHashForCV := LeanTLS.Handshake.transcriptHash transcriptForCV
+
+    -- Extract the Certificate and CertificateVerify payloads
+    let certPayload ← match LeanTLS.Handshake.HandshakeMessage.decode certRaw with
+      | some (msg, _) => pure msg.payload
+      | none => throwTlsError (.certificateError "failed to decode Certificate message")
+    let cvPayload ← match LeanTLS.Handshake.HandshakeMessage.decode cvRaw with
+      | some (msg, _) => pure msg.payload
+      | none => throwTlsError (.certificateError "failed to decode CertificateVerify message")
+
+    -- Verify certificate and signature
+    match LeanTLS.CertVerify.verifyCertificate certPayload cvPayload transcriptHashForCV hostname with
+    | .ok () => pure ()
+    | .error e => throwTlsError e
+
   -- Add EncryptedExtensions, Certificate, CertificateVerify to transcript
   -- (Finished is NOT included when computing the hash to verify it)
   transcript := transcript.push eeRaw
@@ -537,7 +559,20 @@ def recv (conn : TlsConnection) (maxBytes : Nat := 16384) : IO (Option ByteArray
   let mut gotResult := false
   let mut finalResult : Option ByteArray := none
   while !gotResult do
-    let (innerCt, content) ← recvOneRecord conn
+    -- If the server closes the TCP connection (EOF), treat it as end-of-stream.
+    -- This is normal: the server may close the connection after sending close_notify,
+    -- or in some cases close without close_notify.
+    let recvResult ← try
+      let r ← recvOneRecord conn
+      pure (some r)
+    catch _ =>
+      pure none
+    match recvResult with
+    | none =>
+      conn.ref.modify fun s => { s with closed := true }
+      finalResult := none
+      gotResult := true
+    | some (innerCt, content) =>
     match innerCt with
     | .applicationData =>
       if content.size == 0 then
