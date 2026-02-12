@@ -129,18 +129,18 @@ Test coverage:
 lake build integration-test && .lake/build/bin/integration-test
 ```
 
-mozilla.org に対して TLS 1.3 ハンドシェイク（証明書検証有効）を実行し、HTTP レスポンスを検証します。
+Performs a full TLS 1.3 handshake with certificate verification enabled against mozilla.org and verifies the HTTP response.
 
 ## Future Work
 
-- **ECDSA (P-256) 署名検証** — `ecdsa_secp256r1_sha256` (0x0403) 対応。P-256 楕円曲線演算の実装が必要
-- **証明書チェーン検証** — 中間 CA → ルート CA への信頼チェーン検証。システムのルート CA ストア読み込みが必要
-- **証明書の有効期限チェック** — ASN.1 UTCTime / GeneralizedTime のパースと現在時刻との比較
-- **CRL / OCSP** — 証明書失効確認
-- **AES-256-GCM** — `TLS_AES_256_GCM_SHA384` cipher suite 対応
-- **TLS 1.3 セッション再開** — PSK (Pre-Shared Key) によるセッション再開 (0-RTT)
-- **クライアント証明書** — mTLS (mutual TLS) 対応
-- **形式検証** — Lean の証明機能を活用した暗号プリミティブの正当性証明
+- **ECDSA (P-256) signature verification** — Support `ecdsa_secp256r1_sha256` (0x0403). Requires P-256 elliptic curve arithmetic implementation
+- **Certificate chain validation** — Verify the trust chain from leaf through intermediate CAs to a root CA. Requires loading the system root CA store
+- **Certificate expiry checks** — Parse ASN.1 UTCTime / GeneralizedTime and compare against current time
+- **CRL / OCSP** — Certificate revocation checking
+- **AES-256-GCM** — Support the `TLS_AES_256_GCM_SHA384` cipher suite
+- **TLS 1.3 session resumption** — PSK (Pre-Shared Key) based session resumption (0-RTT)
+- **Client certificates** — mTLS (mutual TLS) support
+- **Formal verification** — Leverage Lean's proof capabilities to formally verify correctness of cryptographic primitives
 
 ## References
 
