@@ -1,5 +1,6 @@
 import LeanTLS.Crypto.SHA256
 import LeanTLS.Crypto.HMAC
+import LeanTLS.Utils
 
 set_option autoImplicit false
 
@@ -12,17 +13,6 @@ Pure Lean 4 implementation of TLS 1.3 handshake message types, construction,
 and parsing. Covers ClientHello, ServerHello, Finished messages, and transcript
 hash computation.
 -/
-
--- ============================================================================
--- Section 0: ByteArray equality
--- ============================================================================
-
-/-- Compare two ByteArrays for equality by comparing their underlying data. -/
-def byteArrayEq (a b : ByteArray) : Bool :=
-  a.data == b.data
-
-instance : BEq ByteArray where
-  beq := byteArrayEq
 
 -- ============================================================================
 -- Section 1: Big-endian encoding/decoding helpers
@@ -168,6 +158,19 @@ private def buildSignatureAlgorithmsExt : ByteArray :=
   let data := encodeUInt16BE algos.size.toUInt16 ++ algos
   buildExtension 0x000d data
 
+/-- Build the server_name extension (SNI, type 0x0000) for ClientHello.
+    Content: ServerNameList length(2 bytes) +
+      name_type(1 byte, 0x00 = host_name) +
+      host_name length(2 bytes) +
+      host_name (ASCII bytes). -/
+private def buildSNIExt (hostname : String) : ByteArray :=
+  let nameBytes := hostname.toUTF8
+  -- ServerName entry: name_type(1) + host_name_length(2) + host_name
+  let entry := ByteArray.mk #[0x00] ++ encodeUInt16BE nameBytes.size.toUInt16 ++ nameBytes
+  -- ServerNameList: list_length(2) + entry
+  let data := encodeUInt16BE entry.size.toUInt16 ++ entry
+  buildExtension 0x0000 data
+
 -- ============================================================================
 -- Section 5: ClientHello construction (RFC 8446 Section 4.1.2)
 -- ============================================================================
@@ -185,7 +188,7 @@ structure ClientHelloParams where
     - signature_algorithms extension: [rsa_pss_rsae_sha256 (0x0804),
       ecdsa_secp256r1_sha256 (0x0403)]
     Returns the full ClientHello handshake message bytes (including handshake header). -/
-def buildClientHello (params : ClientHelloParams) (publicKey : ByteArray) : ByteArray :=
+def buildClientHello (params : ClientHelloParams) (publicKey : ByteArray) (hostname : String := "") : ByteArray :=
   -- legacy_version: TLS 1.2 (0x0303)
   let body := encodeUInt16BE 0x0303
   -- random: 32 bytes
@@ -197,7 +200,9 @@ def buildClientHello (params : ClientHelloParams) (publicKey : ByteArray) : Byte
   -- legacy_compression_methods: length (1 byte) + null (0x00)
   let body := body ++ ByteArray.mk #[0x01, 0x00]
   -- extensions
+  let sniExt := if hostname == "" then ByteArray.empty else buildSNIExt hostname
   let extensions :=
+    sniExt ++
     buildSupportedVersionsExt ++
     buildSupportedGroupsExt ++
     buildKeyShareExt publicKey ++
@@ -282,29 +287,32 @@ def parseServerHello (payload : ByteArray) : Option ServerHelloData := do
       if pos + 2 > payload.size then none
       else
         let cipherSuite ← decodeUInt16BE payload pos
-        pos := pos + 2
-        -- compression_method: 1 byte (skip)
-        if pos + 1 > payload.size then none
+        -- Validate cipher suite is TLS_AES_128_GCM_SHA256 (0x1301)
+        if cipherSuite != 0x1301 then none
         else
-          pos := pos + 1
-          -- extensions: length(2) + data
-          let serverPublicKey ←
-            if pos + 2 <= payload.size then do
-              let extLen ← decodeUInt16BE payload pos
-              pos := pos + 2
-              let extEnd := pos + extLen.toNat
-              if extEnd > payload.size then
-                pure none
+          pos := pos + 2
+          -- compression_method: 1 byte (skip)
+          if pos + 1 > payload.size then none
+          else
+            pos := pos + 1
+            -- extensions: length(2) + data
+            let serverPublicKey ←
+              if pos + 2 <= payload.size then do
+                let extLen ← decodeUInt16BE payload pos
+                pos := pos + 2
+                let extEnd := pos + extLen.toNat
+                if extEnd > payload.size then
+                  pure none
+                else
+                  pure (parseServerExtensions payload pos extEnd)
               else
-                pure (parseServerExtensions payload pos extEnd)
-            else
-              pure none
-          some {
-            serverRandom := serverRandom
-            sessionId := sessionId
-            cipherSuite := cipherSuite
-            serverPublicKey := serverPublicKey
-          }
+                pure none
+            some {
+              serverRandom := serverRandom
+              sessionId := sessionId
+              cipherSuite := cipherSuite
+              serverPublicKey := serverPublicKey
+            }
 
 -- ============================================================================
 -- Section 7: Finished message (RFC 8446 Section 4.4.4)
@@ -319,12 +327,7 @@ def buildFinishedVerifyData (finishedKey : ByteArray) (transcriptHash : ByteArra
     against the expected value computed from the finished_key and transcript_hash. -/
 def verifyFinished (finishedKey : ByteArray) (transcriptHash : ByteArray) (verifyData : ByteArray) : Bool :=
   let expected := buildFinishedVerifyData finishedKey transcriptHash
-  -- Constant-time comparison to prevent timing attacks
-  if expected.size != verifyData.size then false
-  else
-    let xorSum := Nat.fold (n := expected.size) (init := (0 : UInt8)) fun i _ acc =>
-      acc ||| ((expected.get! i) ^^^ (verifyData.get! i))
-    xorSum == 0
+  LeanTLS.Utils.constantTimeEq expected verifyData
 
 -- ============================================================================
 -- Section 8: Transcript hash helper
@@ -337,30 +340,7 @@ def transcriptHash (messages : Array ByteArray) : ByteArray :=
   LeanTLS.Crypto.SHA256.hash concatenated
 
 -- ============================================================================
--- Section 9: Hex utilities for testing
--- ============================================================================
-
-/-- Convert a single hex character to its numeric value (0-15). -/
-private def hexCharToNibble (c : Char) : UInt8 :=
-  if '0' ≤ c ∧ c ≤ '9' then (c.toNat - '0'.toNat).toUInt8
-  else if 'a' ≤ c ∧ c ≤ 'f' then (c.toNat - 'a'.toNat + 10).toUInt8
-  else if 'A' ≤ c ∧ c ≤ 'F' then (c.toNat - 'A'.toNat + 10).toUInt8
-  else 0
-
-/-- Convert a hexadecimal string to a ByteArray. -/
-private def hexToBytes (s : String) : ByteArray :=
-  let chars := s.toList
-  go chars #[]
-where
-  go : List Char → Array UInt8 → ByteArray
-    | c1 :: c2 :: rest, acc =>
-      let hi := hexCharToNibble c1
-      let lo := hexCharToNibble c2
-      go rest (acc.push ((hi <<< 4) ||| lo))
-    | _, acc => ByteArray.mk acc
-
--- ============================================================================
--- Section 10: Tests
+-- Section 9: Tests
 -- ============================================================================
 
 /-- Run all Handshake module tests. Returns `true` if all tests pass. -/
@@ -371,7 +351,7 @@ def runTests : IO Bool := do
   -- Test 1: HandshakeMessage encode/decode roundtrip
   -- --------------------------------------------------------------------------
   IO.println "  Handshake test 1 (encode/decode roundtrip):"
-  let testPayload := hexToBytes "deadbeef01020304"
+  let testPayload := LeanTLS.Utils.hexToBytes "deadbeef01020304"
   let origMsg : HandshakeMessage := { msgType := .finished, payload := testPayload }
   let encoded := origMsg.encode
   match HandshakeMessage.decode encoded with
@@ -391,7 +371,7 @@ def runTests : IO Bool := do
 
   -- Test 1b: encode/decode roundtrip with extra trailing bytes
   IO.println "  Handshake test 1b (encode/decode with trailing data):"
-  let trailing := hexToBytes "aabbccdd"
+  let trailing := LeanTLS.Utils.hexToBytes "aabbccdd"
   let encodedWithTrail := encoded ++ trailing
   match HandshakeMessage.decode encodedWithTrail with
   | some (decoded, rest) =>
@@ -486,11 +466,11 @@ def runTests : IO Bool := do
   -- Test 3: Transcript hash
   -- --------------------------------------------------------------------------
   IO.println "  Handshake test 3 (transcript hash):"
-  let msg1 := hexToBytes "010203"
-  let msg2 := hexToBytes "040506"
+  let msg1 := LeanTLS.Utils.hexToBytes "010203"
+  let msg2 := LeanTLS.Utils.hexToBytes "040506"
   let th := transcriptHash #[msg1, msg2]
   -- Expected = SHA-256("010203" ++ "040506") = SHA-256(0x010203040506)
-  let expected := LeanTLS.Crypto.SHA256.hash (hexToBytes "010203040506")
+  let expected := LeanTLS.Crypto.SHA256.hash (LeanTLS.Utils.hexToBytes "010203040506")
   if th == expected then
     IO.println "    PASSED"
   else
@@ -503,8 +483,8 @@ def runTests : IO Bool := do
   -- Test 4: Finished verify_data
   -- --------------------------------------------------------------------------
   IO.println "  Handshake test 4 (Finished verify_data):"
-  let finKey := hexToBytes "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-  let trHash := hexToBytes "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  let finKey := LeanTLS.Utils.hexToBytes "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+  let trHash := LeanTLS.Utils.hexToBytes "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   let vd := buildFinishedVerifyData finKey trHash
   -- verify_data = HMAC-SHA-256(finKey, trHash)
   let expectedVd := LeanTLS.Crypto.HMAC.hmacSHA256 finKey trHash

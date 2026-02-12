@@ -1,6 +1,7 @@
 import LeanTLS.Record
 import LeanTLS.Handshake
 import LeanTLS.KeySchedule
+import LeanTLS.Errors
 import LeanTLS.Crypto.X25519
 import LeanTLS.Crypto.SHA256
 
@@ -86,7 +87,7 @@ private def readExact (stream : IOStream) (n : Nat) : IO ByteArray := do
   while remaining > 0 do
     let chunk ← stream.read remaining
     if chunk.size == 0 then
-      throw (IO.userError "TLS: connection closed unexpectedly while reading")
+      throwTlsError .connectionClosed
     buf := buf ++ chunk
     remaining := remaining - chunk.size
   return buf
@@ -101,7 +102,7 @@ private def readRecord (stream : IOStream) : IO LeanTLS.Record.TLSRecord := do
   let ctByte := header.get! 0
   let ct ← match LeanTLS.Record.ContentType.fromByte ctByte with
     | some ct => pure ct
-    | none => throw (IO.userError s!"TLS: unknown record content type: {ctByte}")
+    | none => throwTlsError (.protocolError s!"unknown record content type: {ctByte}")
   -- Parse legacy version (2 bytes, big-endian)
   let verHi := header.get! 1
   let verLo := header.get! 2
@@ -112,7 +113,7 @@ private def readRecord (stream : IOStream) : IO LeanTLS.Record.TLSRecord := do
   let fragLen : Nat := lenHi.toNat * 256 + lenLo.toNat
   -- Validate fragment length
   if fragLen > 16384 + 256 then
-    throw (IO.userError s!"TLS: record fragment too large: {fragLen}")
+    throwTlsError (.recordOverflow fragLen)
   -- Read the fragment
   let fragment ← readExact stream fragLen
   return {
@@ -140,12 +141,32 @@ private def sendEncryptedHandshake
     (stream : IOStream)
     (state : LeanTLS.Record.RecordEncryptionState)
     (data : ByteArray) : IO LeanTLS.Record.RecordEncryptionState := do
-  let (encRec, newState) := LeanTLS.Record.encryptRecord state .handshake data
-  writeRecord stream encRec
-  return newState
+  match LeanTLS.Record.encryptRecord state .handshake data with
+  | some (encRec, newState) =>
+    writeRecord stream encRec
+    return newState
+  | none => throwTlsError (.internalError "sequence number overflow")
 
 -- ============================================================================
--- Section 6: Handshake message parsing from decrypted content
+-- Section 6: Alert handling helpers
+-- ============================================================================
+
+/-- Handle a decrypted alert payload. For close_notify, marks the connection closed
+    and returns none. For fatal alerts or unknown alerts, throws a TlsError. -/
+private def handleAlert (content : ByteArray) : IO (Option Unit) := do
+  match LeanTLS.decodeAlert content with
+  | some (.warning, .closeNotify) =>
+    return none
+  | some (level, desc) =>
+    throwTlsError (.alertReceived level desc)
+  | none =>
+    if content.size >= 2 then
+      throwTlsError (.protocolError s!"unknown alert: level={content.get! 0}, desc={content.get! 1}")
+    else
+      throwTlsError (.protocolError "malformed alert (too short)")
+
+-- ============================================================================
+-- Section 7: Handshake message parsing from decrypted content
 -- ============================================================================
 
 /-- Parse all handshake messages from a decrypted buffer. Multiple handshake
@@ -158,26 +179,25 @@ private def parseHandshakeMessages (data : ByteArray) : IO (Array ByteArray) := 
   while remaining.size > 0 do
     match LeanTLS.Handshake.HandshakeMessage.decode remaining with
     | some (msg, rest) =>
-      -- Re-encode the message to get the raw bytes for transcript tracking
       let rawBytes := msg.encode
       result := result.push rawBytes
       remaining := rest
     | none =>
-      throw (IO.userError "TLS: failed to parse handshake message from decrypted content")
+      throwTlsError (.protocolError "failed to parse handshake message from decrypted content")
   return result
 
 -- ============================================================================
--- Section 7: Helper to extract handshake type and raw bytes from the array
+-- Section 8: Helper to extract handshake type and raw bytes from the array
 -- ============================================================================
 
 /-- Extract the handshake type from a raw handshake message byte array. -/
 private def getHandshakeType (raw : ByteArray) : IO LeanTLS.Handshake.HandshakeType := do
   match LeanTLS.Handshake.HandshakeMessage.decode raw with
   | some (msg, _) => return msg.msgType
-  | none => throw (IO.userError "TLS: failed to decode handshake message type")
+  | none => throwTlsError (.protocolError "failed to decode handshake message type")
 
 -- ============================================================================
--- Section 8: TLS 1.3 Handshake (connect)
+-- Section 9: TLS 1.3 Handshake (connect)
 -- ============================================================================
 
 namespace TlsConnection
@@ -197,7 +217,7 @@ namespace TlsConnection
     8. Send client Finished
     9. Derive application traffic keys
     10. Return connection ready for application data -/
-def connect (stream : IOStream) (_hostname : String) (_config : TlsConfig := {}) : IO TlsConnection := do
+def connect (stream : IOStream) (hostname : String) (_config : TlsConfig := {}) : IO TlsConnection := do
   -- -----------------------------------------------------------------------
   -- Step 1: Generate random bytes for client_random, session_id, and X25519 private key
   -- -----------------------------------------------------------------------
@@ -217,7 +237,7 @@ def connect (stream : IOStream) (_hostname : String) (_config : TlsConfig := {})
     random := clientRandom
     sessionId := sessionId
   }
-  let clientHelloMsg := LeanTLS.Handshake.buildClientHello params publicKey
+  let clientHelloMsg := LeanTLS.Handshake.buildClientHello params publicKey hostname
 
   -- Initialize transcript with the ClientHello message
   let mut transcript : Array ByteArray := #[clientHelloMsg]
@@ -229,25 +249,29 @@ def connect (stream : IOStream) (_hostname : String) (_config : TlsConfig := {})
   -- -----------------------------------------------------------------------
   let serverHelloRec ← readRecord stream
   if serverHelloRec.contentType != .handshake then
-    throw (IO.userError "TLS: expected handshake record for ServerHello, got different content type")
+    throwTlsError (.unexpectedMessage "handshake" s!"content type {repr serverHelloRec.contentType}")
 
   -- Parse the handshake message
   let (serverHelloHsMsg, _rest) ← match LeanTLS.Handshake.HandshakeMessage.decode serverHelloRec.fragment with
     | some v => pure v
-    | none => throw (IO.userError "TLS: failed to decode ServerHello handshake message")
+    | none => throwTlsError (.handshakeFailure "failed to decode ServerHello handshake message")
 
   if serverHelloHsMsg.msgType != .serverHello then
-    throw (IO.userError "TLS: expected ServerHello handshake type")
+    throwTlsError (.unexpectedMessage "ServerHello" s!"{repr serverHelloHsMsg.msgType}")
 
   -- Parse ServerHello data
   let serverHelloData ← match LeanTLS.Handshake.parseServerHello serverHelloHsMsg.payload with
     | some v => pure v
-    | none => throw (IO.userError "TLS: failed to parse ServerHello payload")
+    | none => throwTlsError (.handshakeFailure "failed to parse ServerHello payload")
+
+  -- Validate cipher suite
+  if serverHelloData.cipherSuite != 0x1301 then
+    throwTlsError (.handshakeFailure "server selected unsupported cipher suite")
 
   -- Extract server's X25519 public key
   let serverPublicKey ← match serverHelloData.serverPublicKey with
     | some k => pure k
-    | none => throw (IO.userError "TLS: ServerHello missing key_share extension (x25519 public key)")
+    | none => throwTlsError (.handshakeFailure "server did not provide X25519 key share")
 
   -- Add the raw ServerHello handshake bytes to the transcript
   let serverHelloRaw := serverHelloHsMsg.encode
@@ -310,21 +334,21 @@ def connect (stream : IOStream) (_hostname : String) (_config : TlsConfig := {})
 
     -- All other records during handshake should be encrypted (applicationData outer type)
     if encRec.contentType != .applicationData then
-      throw (IO.userError "TLS: unexpected record content type during encrypted handshake")
+      throwTlsError (.unexpectedMessage "applicationData" s!"content type {repr encRec.contentType}")
 
     -- Decrypt the record
     let (innerContentType, decryptedContent, newDecState) ←
       match LeanTLS.Record.decryptRecord serverDecState encRec with
       | some v => pure v
-      | none => throw (IO.userError "TLS: failed to decrypt server handshake record")
+      | none => throwTlsError (.decryptionFailed "failed to decrypt server handshake record")
     serverDecState := newDecState
 
     -- The inner content type should be handshake
     if innerContentType != .handshake then
-      -- Could be an alert
       if innerContentType == .alert then
-        throw (IO.userError "TLS: received alert during handshake")
-      throw (IO.userError "TLS: unexpected inner content type during encrypted handshake")
+        let _ ← handleAlert decryptedContent
+        throwTlsError (.handshakeFailure "received alert during handshake")
+      throwTlsError (.unexpectedMessage "handshake" s!"inner content type {repr innerContentType}")
 
     -- Parse potentially multiple handshake messages from the decrypted content
     let msgs ← parseHandshakeMessages decryptedContent
@@ -337,12 +361,22 @@ def connect (stream : IOStream) (_hostname : String) (_config : TlsConfig := {})
 
   -- Validate we have at least 4 messages
   if handshakeMsgBytes.size < 4 then
-    throw (IO.userError "TLS: did not receive all expected handshake messages")
+    throwTlsError (.handshakeFailure "did not receive all expected handshake messages")
 
   let eeRaw := handshakeMsgBytes.get! 0
   let certRaw := handshakeMsgBytes.get! 1
   let cvRaw := handshakeMsgBytes.get! 2
   let finRaw := handshakeMsgBytes.get! 3
+
+  -- Validate minimum handshake message size (4-byte header)
+  if eeRaw.size < 4 then
+    throwTlsError (.protocolError "handshake message too short")
+  if certRaw.size < 4 then
+    throwTlsError (.protocolError "handshake message too short")
+  if cvRaw.size < 4 then
+    throwTlsError (.protocolError "handshake message too short")
+  if finRaw.size < 4 then
+    throwTlsError (.protocolError "handshake message too short")
 
   -- Validate message types
   let eeType ← getHandshakeType eeRaw
@@ -351,13 +385,13 @@ def connect (stream : IOStream) (_hostname : String) (_config : TlsConfig := {})
   let finType ← getHandshakeType finRaw
 
   if eeType != .encryptedExtensions then
-    throw (IO.userError "TLS: expected EncryptedExtensions message")
+    throwTlsError (.unexpectedMessage "EncryptedExtensions" s!"{repr eeType}")
   if certType != .certificate then
-    throw (IO.userError "TLS: expected Certificate message")
+    throwTlsError (.unexpectedMessage "Certificate" s!"{repr certType}")
   if cvType != .certificateVerify then
-    throw (IO.userError "TLS: expected CertificateVerify message")
+    throwTlsError (.unexpectedMessage "CertificateVerify" s!"{repr cvType}")
   if finType != .finished then
-    throw (IO.userError "TLS: expected Finished message")
+    throwTlsError (.unexpectedMessage "Finished" s!"{repr finType}")
 
   -- Add EncryptedExtensions, Certificate, CertificateVerify to transcript
   -- (Finished is NOT included when computing the hash to verify it)
@@ -374,10 +408,10 @@ def connect (stream : IOStream) (_hostname : String) (_config : TlsConfig := {})
   -- Extract the verify_data from the Finished message payload
   let serverFinVerifyData ← match LeanTLS.Handshake.HandshakeMessage.decode finRaw with
     | some (finMsg, _) => pure finMsg.payload
-    | none => throw (IO.userError "TLS: failed to decode server Finished message")
+    | none => throwTlsError (.handshakeFailure "failed to decode server Finished message")
 
   if !(LeanTLS.Handshake.verifyFinished serverFinKey transcriptHashPreFinished serverFinVerifyData) then
-    throw (IO.userError "TLS: server Finished verification failed")
+    throwTlsError (.handshakeFailure "server Finished verification failed")
 
   -- Add server Finished to transcript
   transcript := transcript.push finRaw
@@ -437,20 +471,22 @@ def connect (stream : IOStream) (_hostname : String) (_config : TlsConfig := {})
   return { ref := ref }
 
 -- ============================================================================
--- Section 9: Application data send
+-- Section 10: Application data send
 -- ============================================================================
 
 /-- Send application data over the TLS connection. -/
 def send (conn : TlsConnection) (data : ByteArray) : IO Unit := do
   let st ← conn.ref.get
   if st.closed then
-    throw (IO.userError "TLS: connection is closed")
-  let (encRec, newEncState) := LeanTLS.Record.encryptRecord st.clientEncState .applicationData data
-  writeRecord st.stream encRec
-  conn.ref.modify fun s => { s with clientEncState := newEncState }
+    throwTlsError .connectionClosed
+  match LeanTLS.Record.encryptRecord st.clientEncState .applicationData data with
+  | some (encRec, newEncState) =>
+    writeRecord st.stream encRec
+    conn.ref.modify fun s => { s with clientEncState := newEncState }
+  | none => throwTlsError (.internalError "sequence number overflow")
 
 -- ============================================================================
--- Section 10: Application data receive
+-- Section 11: Application data receive
 -- ============================================================================
 
 /-- Read and decrypt one record, returning the inner content type and plaintext.
@@ -468,7 +504,7 @@ private def recvOneRecord (conn : TlsConnection) : IO (LeanTLS.Record.ContentTyp
       continue
 
     if encRec.contentType != .applicationData then
-      throw (IO.userError "TLS: unexpected record content type during application data")
+      throwTlsError (.unexpectedMessage "applicationData" s!"content type {repr encRec.contentType}")
 
     match LeanTLS.Record.decryptRecord st.serverDecState encRec with
     | some (innerCt, content, newDecState) =>
@@ -477,7 +513,7 @@ private def recvOneRecord (conn : TlsConnection) : IO (LeanTLS.Record.ContentTyp
       resultContent := content
       done := true
     | none =>
-      throw (IO.userError "TLS: failed to decrypt application data record")
+      throwTlsError (.decryptionFailed "failed to decrypt application data record")
   return (resultCt, resultContent)
 
 /-- Receive application data from the TLS connection.
@@ -505,9 +541,7 @@ def recv (conn : TlsConnection) (maxBytes : Nat := 16384) : IO (Option ByteArray
     match innerCt with
     | .applicationData =>
       if content.size == 0 then
-        -- Empty application data, read another record
         continue
-      -- Buffer data and return up to maxBytes
       let toReturn := Nat.min maxBytes content.size
       let result := content.extract 0 toReturn
       if toReturn < content.size then
@@ -516,23 +550,27 @@ def recv (conn : TlsConnection) (maxBytes : Nat := 16384) : IO (Option ByteArray
       finalResult := some result
       gotResult := true
     | .alert =>
-      -- Check for close_notify (alert level 1, description 0)
-      if content.size >= 2 && content.get! 1 == 0 then
+      match LeanTLS.decodeAlert content with
+      | some (.warning, .closeNotify) =>
         conn.ref.modify fun s => { s with closed := true }
         finalResult := none
         gotResult := true
-      else
-        throw (IO.userError "TLS: received alert from server")
+      | some (level, desc) =>
+        throwTlsError (.alertReceived level desc)
+      | none =>
+        if content.size >= 2 then
+          throwTlsError (.protocolError s!"unknown alert: level={content.get! 0}, desc={content.get! 1}")
+        else
+          throwTlsError (.protocolError "malformed alert (too short)")
     | .handshake =>
       -- Post-handshake messages (e.g., NewSessionTicket) -- skip them
       continue
     | .changeCipherSpec =>
-      -- Ignore
       continue
   return finalResult
 
 -- ============================================================================
--- Section 11: Shutdown
+-- Section 12: Shutdown
 -- ============================================================================
 
 /-- Send a close_notify alert and mark the connection as closed. -/
@@ -540,11 +578,12 @@ def shutdown (conn : TlsConnection) : IO Unit := do
   let st ← conn.ref.get
   if st.closed then
     return ()
-  -- close_notify alert: level=warning(1), description=close_notify(0)
-  let alertData := ByteArray.mk #[1, 0]
-  let (encRec, newEncState) := LeanTLS.Record.encryptRecord st.clientEncState .alert alertData
-  writeRecord st.stream encRec
-  conn.ref.modify fun s => { s with clientEncState := newEncState, closed := true }
+  let alertData := LeanTLS.encodeAlert .warning .closeNotify
+  match LeanTLS.Record.encryptRecord st.clientEncState .alert alertData with
+  | some (encRec, newEncState) =>
+    writeRecord st.stream encRec
+    conn.ref.modify fun s => { s with clientEncState := newEncState, closed := true }
+  | none => throwTlsError (.internalError "sequence number overflow")
 
 end TlsConnection
 

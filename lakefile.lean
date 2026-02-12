@@ -11,3 +11,7 @@ lean_lib «LeanTLS» where
 lean_exe «tests» where
   srcDir := "Tests"
   root := `Main
+
+lean_exe «integration-test» where
+  srcDir := "Tests"
+  root := `Integration

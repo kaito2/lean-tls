@@ -1,4 +1,5 @@
 import LeanTLS.Crypto.SHA256
+import LeanTLS.Utils
 
 set_option autoImplicit false
 
@@ -57,6 +58,7 @@ private def prepareKey (key : ByteArray) : ByteArray :=
 -- ============================================================================
 
 /-- XOR each byte of a ByteArray with a constant byte. -/
+-- Safe: i ranges over [0, ba.size); .get! i is always in bounds
 private def xorWithByte (ba : ByteArray) (b : UInt8) : ByteArray :=
   let result := Nat.fold (n := ba.size) (init := ByteArray.mkEmpty ba.size) fun i _ acc =>
     acc.push ((ba.get! i) ^^^ b)
@@ -84,33 +86,7 @@ def hmacSHA256 (key : ByteArray) (message : ByteArray) : ByteArray :=
   LeanTLS.Crypto.SHA256.hash outerData
 
 -- ============================================================================
--- Section 5: Hex utility helpers for testing
--- ============================================================================
-
-/-- Convert a single hex character to its numeric value (0-15).
-    Returns 0 for invalid characters. -/
-private def hexCharToNibble (c : Char) : UInt8 :=
-  if '0' ≤ c ∧ c ≤ '9' then (c.toNat - '0'.toNat).toUInt8
-  else if 'a' ≤ c ∧ c ≤ 'f' then (c.toNat - 'a'.toNat + 10).toUInt8
-  else if 'A' ≤ c ∧ c ≤ 'F' then (c.toNat - 'A'.toNat + 10).toUInt8
-  else 0
-
-/-- Convert a hexadecimal string to a ByteArray.
-    The string must have an even number of characters. -/
-private def hexToBytes (s : String) : ByteArray :=
-  let chars := s.toList
-  let pairs := go chars #[]
-  ByteArray.mk pairs
-where
-  go : List Char → Array UInt8 → Array UInt8
-    | c1 :: c2 :: rest, acc =>
-      let hi := hexCharToNibble c1
-      let lo := hexCharToNibble c2
-      go rest (acc.push ((hi <<< 4) ||| lo))
-    | _, acc => acc
-
--- ============================================================================
--- Section 6: Test vectors (RFC 4231)
+-- Section 5: Test vectors (RFC 4231)
 -- ============================================================================
 
 /-- Run HMAC-SHA-256 test vectors from RFC 4231. Returns `true` if all tests pass. -/
@@ -120,8 +96,8 @@ def runTests : IO Bool := do
   -- Test Case 1
   -- Key = 0x0b repeated 20 times
   -- Data = "Hi There"
-  let key1 := hexToBytes "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
-  let data1 := hexToBytes "4869205468657265"
+  let key1 := LeanTLS.Utils.hexToBytes "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+  let data1 := LeanTLS.Utils.hexToBytes "4869205468657265"
   let expected1 := "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
   let result1 := LeanTLS.Crypto.SHA256.toHex (hmacSHA256 key1 data1)
   if result1 == expected1 then
@@ -135,8 +111,8 @@ def runTests : IO Bool := do
   -- Test Case 2
   -- Key = "Jefe"
   -- Data = "what do ya want for nothing?"
-  let key2 := hexToBytes "4a656665"
-  let data2 := hexToBytes "7768617420646f2079612077616e7420666f72206e6f7468696e673f"
+  let key2 := LeanTLS.Utils.hexToBytes "4a656665"
+  let data2 := LeanTLS.Utils.hexToBytes "7768617420646f2079612077616e7420666f72206e6f7468696e673f"
   let expected2 := "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
   let result2 := LeanTLS.Crypto.SHA256.toHex (hmacSHA256 key2 data2)
   if result2 == expected2 then
@@ -150,8 +126,8 @@ def runTests : IO Bool := do
   -- Test Case 3
   -- Key = 0xaa repeated 20 times
   -- Data = 0xdd repeated 50 times
-  let key3 := hexToBytes "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  let data3 := hexToBytes "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  let key3 := LeanTLS.Utils.hexToBytes "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  let data3 := LeanTLS.Utils.hexToBytes "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
   let expected3 := "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe"
   let result3 := LeanTLS.Crypto.SHA256.toHex (hmacSHA256 key3 data3)
   if result3 == expected3 then

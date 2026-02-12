@@ -1,3 +1,5 @@
+import LeanTLS.Utils
+
 namespace LeanTLS.Crypto.SHA256
 
 /-!
@@ -82,6 +84,7 @@ def K : Array UInt32 := #[
 -- ============================================================================
 
 /-- Read a big-endian UInt32 from 4 bytes starting at index `i`. -/
+-- Callers ensure i + 3 < data.size (block is 64 bytes, i = blockOffset + k*4, k in [0,15])
 def getUInt32BE (data : ByteArray) (i : Nat) : UInt32 :=
   let b0 := (data.get! i).toUInt32
   let b1 := (data.get! (i + 1)).toUInt32
@@ -138,10 +141,11 @@ def pad (msg : ByteArray) : ByteArray :=
     W[t] = M[t]                                          for 0 <= t <= 15
     W[t] = sigma1(W[t-2]) + W[t-7] + sigma0(W[t-15]) + W[t-16]  for 16 <= t <= 63 -/
 def messageSchedule (block : ByteArray) (blockOffset : Nat) : Array UInt32 :=
-  -- First 16 words from the block
+  -- Safe: block is padded to 64-byte multiples; blockOffset + i*4 + 3 < paddedMsg.size
   let w : Array UInt32 := Nat.fold (n := 16) (init := #[]) fun i _ acc =>
     acc.push (getUInt32BE block (blockOffset + i * 4))
   -- Extend to 64 words
+  -- Safe: acc grows from 16 to 64 entries; t-2, t-7, t-15, t-16 are all >= 0
   let w := Nat.fold (n := 48) (init := w) fun i _ acc =>
     let t := i + 16
     let s1 := smallSigma1 (acc.get! (t - 2))
@@ -182,7 +186,7 @@ structure WorkState where
     Takes the current hash state (8 words) and returns the updated hash state. -/
 def processBlock (hashState : Array UInt32) (paddedMsg : ByteArray) (blockOffset : Nat) : Array UInt32 :=
   let w := messageSchedule paddedMsg blockOffset
-  -- Initialize working variables from the current hash state
+  -- Safe: hashState always has exactly 8 elements (initialized from H0)
   let initState : WorkState :=
     { a := hashState.get! 0
       b := hashState.get! 1
@@ -192,10 +196,10 @@ def processBlock (hashState : Array UInt32) (paddedMsg : ByteArray) (blockOffset
       f := hashState.get! 5
       g := hashState.get! 6
       h := hashState.get! 7 }
-  -- Run 64 rounds
+  -- Safe: K has 64 entries, w has 64 entries, t ranges over [0, 64)
   let finalState := Nat.fold (n := 64) (init := initState) fun t _ acc =>
     compressionRound acc (K.get! t) (w.get! t)
-  -- Compute new hash values: H_i = a_i + H_{i-1}
+  -- Safe: hashState always has 8 elements
   #[ hashState.get! 0 + finalState.a,
      hashState.get! 1 + finalState.b,
      hashState.get! 2 + finalState.c,
@@ -216,7 +220,7 @@ def hash (msg : ByteArray) : ByteArray :=
   -- Process each 64-byte block
   let finalHash := Nat.fold (n := numBlocks) (init := H0) fun i _ acc =>
     processBlock acc padded (i * 64)
-  -- Convert the 8 UInt32 words to a 32-byte ByteArray
+  -- Safe: finalHash always has 8 entries (invariant of processBlock)
   let result := Nat.fold (n := 8) (init := ByteArray.empty) fun i _ acc =>
     acc ++ putUInt32BE (finalHash.get! i)
   result
@@ -225,19 +229,8 @@ def hash (msg : ByteArray) : ByteArray :=
 -- Section 8: Utility helpers for testing
 -- ============================================================================
 
-/-- Convert a single byte to its two-character hex representation. -/
-private def byteToHex (b : UInt8) : String :=
-  let hexChars := "0123456789abcdef"
-  let hi := (b >>> 4).toNat
-  let lo := (b &&& 0x0f).toNat
-  let hiC := hexChars.get! ⟨hi⟩
-  let loC := hexChars.get! ⟨lo⟩
-  String.mk [hiC, loC]
-
 /-- Convert a `ByteArray` to a lowercase hexadecimal string. -/
-def toHex (ba : ByteArray) : String :=
-  Nat.fold (n := ba.size) (init := "") fun i _ acc =>
-    acc ++ byteToHex (ba.get! i)
+def toHex := LeanTLS.Utils.bytesToHex
 
 /-- Convert a UTF-8 string to a `ByteArray`. -/
 def stringToBytes (s : String) : ByteArray :=

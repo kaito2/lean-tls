@@ -1,4 +1,6 @@
 import LeanTLS.Crypto.GCM
+import LeanTLS.Errors
+import LeanTLS.Utils
 
 /-
   TLS 1.3 Record Layer (RFC 8446 Section 5)
@@ -14,45 +16,6 @@ import LeanTLS.Crypto.GCM
 set_option autoImplicit false
 
 namespace LeanTLS.Record
-
-/-! ## Utility Functions -/
-
-/-- Convert a hex character to its 4-bit value. -/
-private def hexCharToNibble (c : Char) : UInt8 :=
-  if '0' <= c && c <= '9' then (c.toNat - '0'.toNat).toUInt8
-  else if 'a' <= c && c <= 'f' then (c.toNat - 'a'.toNat + 10).toUInt8
-  else if 'A' <= c && c <= 'F' then (c.toNat - 'A'.toNat + 10).toUInt8
-  else 0
-
-/-- Convert a hex string to ByteArray. -/
-private def hexToBytes (hex : String) : ByteArray :=
-  let chars := hex.toList
-  go chars ByteArray.empty
-where
-  go (cs : List Char) (acc : ByteArray) : ByteArray :=
-    match cs with
-    | c1 :: c2 :: rest =>
-      let nibbleHi := hexCharToNibble c1
-      let nibbleLo := hexCharToNibble c2
-      let byte : UInt8 := (nibbleHi <<< 4) ||| nibbleLo
-      go rest (acc.push byte)
-    | _ => acc
-
-/-- Convert a single byte to two hex characters. -/
-private def byteToHex (b : UInt8) : String :=
-  let hexChars := "0123456789abcdef"
-  let hi := (b >>> 4).toNat
-  let lo := (b &&& 0x0f).toNat
-  let c1 := hexChars.get ⟨hi⟩
-  let c2 := hexChars.get ⟨lo⟩
-  String.mk [c1, c2]
-
-/-- Convert a ByteArray to a hex string. -/
-private def bytesToHex (bs : ByteArray) : String := Id.run do
-  let mut result := ""
-  for i in [:bs.size] do
-    result := result ++ byteToHex (bs.get! i)
-  return result
 
 /-! ## Content Types (RFC 8446 Section 5.1) -/
 
@@ -91,8 +54,12 @@ structure TLSRecord where
   legacyVersion : UInt16 := 0x0303
   fragment : ByteArray
 
-/-- Maximum TLS record fragment length: 2^14 = 16384 bytes. -/
+/-- Maximum TLS plaintext record fragment length: 2^14 = 16384 bytes (RFC 8446 Section 5.1). -/
 def maxFragmentLength : Nat := 16384
+
+/-- Maximum TLS encrypted record fragment length: 2^14 + 256 bytes
+    (accounts for inner content type + AEAD tag + padding, RFC 8446 Section 5.2). -/
+def maxEncryptedFragmentLength : Nat := 16384 + 256
 
 /-! ## Plain Record Encoding/Decoding -/
 
@@ -129,6 +96,7 @@ def TLSRecord.decode (data : ByteArray) : Option (TLSRecord × ByteArray) := do
     none
   else
     -- Parse content type
+    -- Safety: data.size >= 5 is checked above, so indices 0..4 are in bounds
     let ctByte := data.get! 0
     let ct ← ContentType.fromByte ctByte
     -- Parse legacy version (big-endian)
@@ -139,8 +107,14 @@ def TLSRecord.decode (data : ByteArray) : Option (TLSRecord × ByteArray) := do
     let lenHi := data.get! 3
     let lenLo := data.get! 4
     let fragLen : Nat := lenHi.toNat * 256 + lenLo.toNat
-    -- Check we have enough data for the fragment
-    if data.size < 5 + fragLen then
+    -- Validate fragment length per RFC 8446:
+    -- Encrypted records (applicationData) may be up to 2^14 + 256 bytes.
+    -- Plaintext records must be at most 2^14 bytes.
+    let maxLen := if ct == .applicationData then maxEncryptedFragmentLength else maxFragmentLength
+    if fragLen > maxLen then
+      none
+    else if data.size < 5 + fragLen then
+      -- Check we have enough data for the fragment
       none
     else
       let fragment := data.extract 5 (5 + fragLen)
@@ -173,6 +147,10 @@ structure RecordEncryptionState where
     The sequence number is placed in the rightmost 8 bytes; the leftmost 4 bytes
     of the padding are zero. -/
 def buildNonce (iv : ByteArray) (seqNum : UInt64) : ByteArray := Id.run do
+  -- Guard: IV must be exactly 12 bytes
+  if iv.size != 12 then
+    -- Return zero nonce as fallback (should never happen with correct key material)
+    return ByteArray.mk (Array.mkArray 12 0)
   -- Build a 12-byte padded sequence number (4 zero bytes + 8 bytes big-endian)
   let mut paddedSeq := ByteArray.mkEmpty 12
   -- 4 bytes of zero padding
@@ -188,6 +166,7 @@ def buildNonce (iv : ByteArray) (seqNum : UInt64) : ByteArray := Id.run do
   paddedSeq := paddedSeq.push (seqNum >>> 8).toUInt8
   paddedSeq := paddedSeq.push seqNum.toUInt8
   -- XOR with IV
+  -- Safety: both iv and paddedSeq are exactly 12 bytes, so indices 0..11 are in bounds
   let mut nonce := ByteArray.mkEmpty 12
   for i in [:12] do
     nonce := nonce.push (iv.get! i ^^^ paddedSeq.get! i)
@@ -220,7 +199,10 @@ private def buildEncryptedRecordHeader (encryptedLen : Nat) : ByteArray := Id.ru
     Returns the encrypted TLSRecord (outer type = applicationData) and updated state
     with incremented sequence number. -/
 def encryptRecord (state : RecordEncryptionState) (contentType : ContentType) (content : ByteArray)
-    : TLSRecord × RecordEncryptionState := Id.run do
+    : Option (TLSRecord × RecordEncryptionState) := do
+  -- Sequence number overflow protection: must not wrap around
+  if state.seqNum == (18446744073709551615 : UInt64) then
+    none
   -- Build inner plaintext: content ++ content type byte
   let innerPlaintext := content.push contentType.toByte
   -- Compute per-record nonce
@@ -245,7 +227,7 @@ def encryptRecord (state : RecordEncryptionState) (contentType : ContentType) (c
     iv := state.iv
     seqNum := state.seqNum + 1
   }
-  return (record, newState)
+  some (record, newState)
 
 /-- Remove trailing zero padding from inner plaintext and extract the real content type.
     The inner plaintext format is: content ++ [contentType] ++ zero_padding.
@@ -256,6 +238,7 @@ private def parseInnerPlaintext (innerPlaintext : ByteArray) : Option (ContentTy
   else
     -- Find the last non-zero byte (this is the content type)
     -- Walk backward past any zero padding
+    -- Safety: pos ranges from innerPlaintext.size-1 down to 0, all in bounds since size > 0
     let mut found := false
     let mut ctIdx := 0
     for i in [:innerPlaintext.size] do
@@ -266,6 +249,7 @@ private def parseInnerPlaintext (innerPlaintext : ByteArray) : Option (ContentTy
     if !found then
       none
     else
+      -- Safety: ctIdx was set from a valid pos in the loop above
       let ctByte := innerPlaintext.get! ctIdx
       let ct ← ContentType.fromByte ctByte
       let content := innerPlaintext.extract 0 ctIdx
@@ -285,8 +269,11 @@ private def parseInnerPlaintext (innerPlaintext : ByteArray) : Option (ContentTy
     inner content type), returns none. -/
 def decryptRecord (state : RecordEncryptionState) (rec : TLSRecord)
     : Option (ContentType × ByteArray × RecordEncryptionState) := do
+  -- Sequence number overflow protection: must not wrap around
+  if state.seqNum == (18446744073709551615 : UInt64) then
+    none
   -- Outer content type must be applicationData
-  if rec.contentType != .applicationData then
+  else if rec.contentType != .applicationData then
     none
   else
     -- Fragment must be at least 17 bytes (1 byte inner content type + 16 byte tag)
@@ -315,15 +302,6 @@ def decryptRecord (state : RecordEncryptionState) (rec : TLSRecord)
 
 /-! ## Tests -/
 
-/-- Compare two ByteArrays for equality. -/
-private def byteArrayEq (a : ByteArray) (b : ByteArray) : Bool :=
-  if a.size != b.size then false
-  else Id.run do
-    let mut eq := true
-    for i in [:a.size] do
-      if a.get! i != b.get! i then
-        eq := false
-    return eq
 
 /-- Run all Record Layer tests. Returns true if all tests pass. -/
 def runTests : IO Bool := do
@@ -371,7 +349,7 @@ def runTests : IO Bool := do
     else if decoded.legacyVersion != 0x0303 then
       IO.println "[FAIL] Record decode: wrong legacy version"
       allPassed := false
-    else if !byteArrayEq decoded.fragment handshakeData then
+    else if !LeanTLS.Utils.byteArrayBEq decoded.fragment handshakeData then
       IO.println "[FAIL] Record decode: fragment mismatch"
       allPassed := false
     else if remaining.size != 0 then
@@ -407,32 +385,32 @@ def runTests : IO Bool := do
   IO.println "--- Nonce Construction Tests ---"
 
   -- Test 2a: IV = 000000000000000000000001, seqNum = 0
-  let iv1 := hexToBytes "000000000000000000000001"
+  let iv1 := LeanTLS.Utils.hexToBytes "000000000000000000000001"
   let nonce1 := buildNonce iv1 0
-  let expected1 := hexToBytes "000000000000000000000001"
-  if byteArrayEq nonce1 expected1 then
+  let expected1 := LeanTLS.Utils.hexToBytes "000000000000000000000001"
+  if LeanTLS.Utils.byteArrayBEq nonce1 expected1 then
     IO.println "[PASS] Nonce: IV=...0001, seq=0 -> ...0001"
   else
-    IO.println s!"[FAIL] Nonce: IV=...0001, seq=0: expected {bytesToHex expected1}, got {bytesToHex nonce1}"
+    IO.println s!"[FAIL] Nonce: IV=...0001, seq=0: expected {LeanTLS.Utils.bytesToHex expected1}, got {LeanTLS.Utils.bytesToHex nonce1}"
     allPassed := false
 
   -- Test 2b: IV = 000000000000000000000001, seqNum = 1
   let nonce2 := buildNonce iv1 1
-  let expected2 := hexToBytes "000000000000000000000000"
-  if byteArrayEq nonce2 expected2 then
+  let expected2 := LeanTLS.Utils.hexToBytes "000000000000000000000000"
+  if LeanTLS.Utils.byteArrayBEq nonce2 expected2 then
     IO.println "[PASS] Nonce: IV=...0001, seq=1 -> ...0000"
   else
-    IO.println s!"[FAIL] Nonce: IV=...0001, seq=1: expected {bytesToHex expected2}, got {bytesToHex nonce2}"
+    IO.println s!"[FAIL] Nonce: IV=...0001, seq=1: expected {LeanTLS.Utils.bytesToHex expected2}, got {LeanTLS.Utils.bytesToHex nonce2}"
     allPassed := false
 
   -- Test 2c: IV = e0e1e2e3e4e5e6e7e8e9eaeb, seqNum = 0
-  let iv3 := hexToBytes "e0e1e2e3e4e5e6e7e8e9eaeb"
+  let iv3 := LeanTLS.Utils.hexToBytes "e0e1e2e3e4e5e6e7e8e9eaeb"
   let nonce3 := buildNonce iv3 0
-  let expected3 := hexToBytes "e0e1e2e3e4e5e6e7e8e9eaeb"
-  if byteArrayEq nonce3 expected3 then
+  let expected3 := LeanTLS.Utils.hexToBytes "e0e1e2e3e4e5e6e7e8e9eaeb"
+  if LeanTLS.Utils.byteArrayBEq nonce3 expected3 then
     IO.println "[PASS] Nonce: IV=e0e1...eaeb, seq=0 -> e0e1...eaeb"
   else
-    IO.println s!"[FAIL] Nonce: IV=e0e1...eaeb, seq=0: expected {bytesToHex expected3}, got {bytesToHex nonce3}"
+    IO.println s!"[FAIL] Nonce: IV=e0e1...eaeb, seq=0: expected {LeanTLS.Utils.bytesToHex expected3}, got {LeanTLS.Utils.bytesToHex nonce3}"
     allPassed := false
 
   -- ===== Test 3: Encrypt/decrypt roundtrip =====
@@ -440,8 +418,8 @@ def runTests : IO Bool := do
   IO.println "--- Encrypt/Decrypt Roundtrip Tests ---"
 
   -- Use a known key and IV
-  let testKey := hexToBytes "000102030405060708090a0b0c0d0e0f"
-  let testIV := hexToBytes "000000000000000000000001"
+  let testKey := LeanTLS.Utils.hexToBytes "000102030405060708090a0b0c0d0e0f"
+  let testIV := LeanTLS.Utils.hexToBytes "000000000000000000000001"
 
   let encState : RecordEncryptionState := {
     key := testKey
@@ -451,100 +429,108 @@ def runTests : IO Bool := do
 
   -- Create a handshake message to encrypt
   let handshakeMsg := ByteArray.mk #[0x01, 0x00, 0x00, 0x05, 0x03, 0x03, 0x01, 0x02, 0x03]
-  let (encryptedRec, encState2) := encryptRecord encState .handshake handshakeMsg
-
-  -- Verify the outer content type is applicationData
-  if encryptedRec.contentType != .applicationData then
-    IO.println "[FAIL] Encrypt: outer content type is not applicationData"
-    allPassed := false
-  else
-    IO.println "[PASS] Encrypt: outer content type is applicationData"
-
-  -- Verify sequence number incremented
-  if encState2.seqNum != 1 then
-    IO.println s!"[FAIL] Encrypt: sequence number should be 1, got {encState2.seqNum}"
-    allPassed := false
-  else
-    IO.println "[PASS] Encrypt: sequence number incremented to 1"
-
-  -- Verify fragment size: inner plaintext (9 + 1 content type) encrypted = 10 ciphertext + 16 tag = 26
-  if encryptedRec.fragment.size != 26 then
-    IO.println s!"[FAIL] Encrypt: expected fragment size 26, got {encryptedRec.fragment.size}"
-    allPassed := false
-  else
-    IO.println "[PASS] Encrypt: correct fragment size"
-
-  -- Now decrypt with matching state (seqNum = 0)
-  let decState : RecordEncryptionState := {
-    key := testKey
-    iv := testIV
-    seqNum := 0
-  }
-
-  match decryptRecord decState encryptedRec with
+  match encryptRecord encState .handshake handshakeMsg with
   | none =>
-    IO.println "[FAIL] Decrypt: returned none"
+    IO.println "[FAIL] Encrypt: returned none"
     allPassed := false
-  | some (decCt, decContent, decState2) =>
-    if decCt != .handshake then
-      IO.println "[FAIL] Decrypt: wrong content type"
-      allPassed := false
-    else if !byteArrayEq decContent handshakeMsg then
-      IO.println s!"[FAIL] Decrypt: content mismatch, expected {bytesToHex handshakeMsg}, got {bytesToHex decContent}"
-      allPassed := false
-    else if decState2.seqNum != 1 then
-      IO.println s!"[FAIL] Decrypt: sequence number should be 1, got {decState2.seqNum}"
+  | some (encryptedRec, encState2) =>
+
+    -- Verify the outer content type is applicationData
+    if encryptedRec.contentType != .applicationData then
+      IO.println "[FAIL] Encrypt: outer content type is not applicationData"
       allPassed := false
     else
-      IO.println "[PASS] Encrypt/decrypt roundtrip: content and type match"
-      IO.println "[PASS] Decrypt: sequence number incremented to 1"
+      IO.println "[PASS] Encrypt: outer content type is applicationData"
 
-  -- Test encrypt/decrypt with a second record (seqNum = 1)
-  let appMsg := ByteArray.mk #[0x48, 0x65, 0x6C, 0x6C, 0x6F]  -- "Hello"
-  let (encryptedRec2, encState3) := encryptRecord encState2 .applicationData appMsg
-
-  if encState3.seqNum != 2 then
-    IO.println s!"[FAIL] Encrypt #2: sequence number should be 2, got {encState3.seqNum}"
-    allPassed := false
-  else
-    IO.println "[PASS] Encrypt #2: sequence number incremented to 2"
-
-  -- Decrypt the second record with matching state (seqNum = 1)
-  let decState2b : RecordEncryptionState := {
-    key := testKey
-    iv := testIV
-    seqNum := 1
-  }
-
-  match decryptRecord decState2b encryptedRec2 with
-  | none =>
-    IO.println "[FAIL] Decrypt #2: returned none"
-    allPassed := false
-  | some (decCt2, decContent2, decState3b) =>
-    if decCt2 != .applicationData then
-      IO.println "[FAIL] Decrypt #2: wrong content type"
-      allPassed := false
-    else if !byteArrayEq decContent2 appMsg then
-      IO.println "[FAIL] Decrypt #2: content mismatch"
-      allPassed := false
-    else if decState3b.seqNum != 2 then
-      IO.println s!"[FAIL] Decrypt #2: sequence number should be 2, got {decState3b.seqNum}"
+    -- Verify sequence number incremented
+    if encState2.seqNum != 1 then
+      IO.println s!"[FAIL] Encrypt: sequence number should be 1, got {encState2.seqNum}"
       allPassed := false
     else
-      IO.println "[PASS] Encrypt/decrypt roundtrip #2: content and type match"
+      IO.println "[PASS] Encrypt: sequence number incremented to 1"
 
-  -- Test decryption failure with wrong sequence number
-  let wrongState : RecordEncryptionState := {
-    key := testKey
-    iv := testIV
-    seqNum := 99  -- wrong seq num
-  }
-  match decryptRecord wrongState encryptedRec with
-  | none =>
-    IO.println "[PASS] Decrypt with wrong seqNum correctly fails"
-  | some _ =>
-    IO.println "[FAIL] Decrypt with wrong seqNum should have failed"
-    allPassed := false
+    -- Verify fragment size: inner plaintext (9 + 1 content type) encrypted = 10 ciphertext + 16 tag = 26
+    if encryptedRec.fragment.size != 26 then
+      IO.println s!"[FAIL] Encrypt: expected fragment size 26, got {encryptedRec.fragment.size}"
+      allPassed := false
+    else
+      IO.println "[PASS] Encrypt: correct fragment size"
+
+    -- Now decrypt with matching state (seqNum = 0)
+    let decState : RecordEncryptionState := {
+      key := testKey
+      iv := testIV
+      seqNum := 0
+    }
+
+    match decryptRecord decState encryptedRec with
+    | none =>
+      IO.println "[FAIL] Decrypt: returned none"
+      allPassed := false
+    | some (decCt, decContent, decState2) =>
+      if decCt != .handshake then
+        IO.println "[FAIL] Decrypt: wrong content type"
+        allPassed := false
+      else if !LeanTLS.Utils.byteArrayBEq decContent handshakeMsg then
+        IO.println s!"[FAIL] Decrypt: content mismatch, expected {LeanTLS.Utils.bytesToHex handshakeMsg}, got {LeanTLS.Utils.bytesToHex decContent}"
+        allPassed := false
+      else if decState2.seqNum != 1 then
+        IO.println s!"[FAIL] Decrypt: sequence number should be 1, got {decState2.seqNum}"
+        allPassed := false
+      else
+        IO.println "[PASS] Encrypt/decrypt roundtrip: content and type match"
+        IO.println "[PASS] Decrypt: sequence number incremented to 1"
+
+    -- Test encrypt/decrypt with a second record (seqNum = 1)
+    let appMsg := ByteArray.mk #[0x48, 0x65, 0x6C, 0x6C, 0x6F]  -- "Hello"
+    match encryptRecord encState2 .applicationData appMsg with
+    | none =>
+      IO.println "[FAIL] Encrypt #2: returned none"
+      allPassed := false
+    | some (encryptedRec2, encState3) =>
+
+      if encState3.seqNum != 2 then
+        IO.println s!"[FAIL] Encrypt #2: sequence number should be 2, got {encState3.seqNum}"
+        allPassed := false
+      else
+        IO.println "[PASS] Encrypt #2: sequence number incremented to 2"
+
+      -- Decrypt the second record with matching state (seqNum = 1)
+      let decState2b : RecordEncryptionState := {
+        key := testKey
+        iv := testIV
+        seqNum := 1
+      }
+
+      match decryptRecord decState2b encryptedRec2 with
+      | none =>
+        IO.println "[FAIL] Decrypt #2: returned none"
+        allPassed := false
+      | some (decCt2, decContent2, decState3b) =>
+        if decCt2 != .applicationData then
+          IO.println "[FAIL] Decrypt #2: wrong content type"
+          allPassed := false
+        else if !LeanTLS.Utils.byteArrayBEq decContent2 appMsg then
+          IO.println "[FAIL] Decrypt #2: content mismatch"
+          allPassed := false
+        else if decState3b.seqNum != 2 then
+          IO.println s!"[FAIL] Decrypt #2: sequence number should be 2, got {decState3b.seqNum}"
+          allPassed := false
+        else
+          IO.println "[PASS] Encrypt/decrypt roundtrip #2: content and type match"
+
+    -- Test decryption failure with wrong sequence number
+    let wrongState : RecordEncryptionState := {
+      key := testKey
+      iv := testIV
+      seqNum := 99  -- wrong seq num
+    }
+    match decryptRecord wrongState encryptedRec with
+    | none =>
+      IO.println "[PASS] Decrypt with wrong seqNum correctly fails"
+    | some _ =>
+      IO.println "[FAIL] Decrypt with wrong seqNum should have failed"
+      allPassed := false
 
   -- Summary
   IO.println ""

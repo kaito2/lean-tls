@@ -1,4 +1,5 @@
 import LeanTLS.Crypto.AES
+import LeanTLS.Utils
 
 /-
   AES-128-GCM Authenticated Encryption (NIST SP 800-38D)
@@ -22,6 +23,7 @@ private def xorBytes (a : ByteArray) (b : ByteArray) : ByteArray := Id.run do
   let len := min a.size b.size
   let mut result := ByteArray.mkEmpty len
   for i in [:len] do
+    -- Safe: i < len = min a.size b.size, so i < a.size and i < b.size
     result := result.push (a.get! i ^^^ b.get! i)
   return result
 
@@ -53,7 +55,7 @@ private def natToBytes64BE (n : Nat) : ByteArray := Id.run do
 
 /-- Increment the rightmost 32 bits (bytes 12-15) of a 16-byte block in big-endian. -/
 private def incrCounter (block : ByteArray) : ByteArray := Id.run do
-  -- Read bytes 12..15 as a 32-bit big-endian integer
+  -- Safe: block is always a 16-byte counter block; indices 12..15 are in bounds
   let b12 := block.get! 12
   let b13 := block.get! 13
   let b14 := block.get! 14
@@ -102,6 +104,7 @@ private def getBit (block : ByteArray) (i : Nat) : Bool :=
   let byteIdx := i / 8
   let bitIdx := 7 - (i % 8)
   if byteIdx < block.size then
+    -- Safe: byteIdx < block.size is checked by the guard above
     (block.get! byteIdx >>> bitIdx.toUInt8) &&& 1 == 1
   else
     false
@@ -111,6 +114,7 @@ private def shiftRight1 (block : ByteArray) : ByteArray := Id.run do
   let mut result := ByteArray.mkEmpty 16
   let mut carry : UInt8 := 0
   for i in [:16] do
+    -- Safe: block is always 16 bytes; i ranges over [0, 16)
     let b := block.get! i
     let newByte := (b >>> 1) ||| (carry <<< 7)
     carry := b &&& 1
@@ -124,7 +128,7 @@ def gfMul (x : ByteArray) (y : ByteArray) : ByteArray := Id.run do
   for i in [:128] do
     if getBit x i then
       z := xorBytes z v
-    -- Check if LSB of V is set
+    -- Safe: v is always 16 bytes; index 15 is the last byte
     let lsb := v.get! 15 &&& 1
     v := shiftRight1 v
     if lsb == 1 then
@@ -190,6 +194,7 @@ def encrypt (key : ByteArray) (iv : ByteArray) (plaintext : ByteArray) (aad : By
   -- J0 = IV || 0x00000001 (for 96-bit IV)
   let mut j0 := ByteArray.mkEmpty 16
   for i in [:12] do
+    -- Safe: iv is 12 bytes; i ranges over [0, 12)
     j0 := j0.push (iv.get! i)
   j0 := j0.push 0x00
   j0 := j0.push 0x00
@@ -211,6 +216,7 @@ def encrypt (key : ByteArray) (iv : ByteArray) (plaintext : ByteArray) (aad : By
     let keystream := LeanTLS.Crypto.AES.encryptBlock key counter
     let off := i * 16
     for j in [:16] do
+      -- Safe: off + j < fullBlocks*16 <= plaintext.size; keystream is 16 bytes
       ciphertext := ciphertext.push (plaintext.get! (off + j) ^^^ keystream.get! j)
 
   -- Process remaining bytes (partial block)
@@ -219,6 +225,7 @@ def encrypt (key : ByteArray) (iv : ByteArray) (plaintext : ByteArray) (aad : By
     let keystream := LeanTLS.Crypto.AES.encryptBlock key counter
     let off := fullBlocks * 16
     for j in [:remainder] do
+      -- Safe: off + j < plaintext.size; j < remainder <= 15 < keystream.size
       ciphertext := ciphertext.push (plaintext.get! (off + j) ^^^ keystream.get! j)
 
   -- Compute authentication tag
@@ -241,6 +248,7 @@ def decrypt (key : ByteArray) (iv : ByteArray) (ciphertext : ByteArray) (aad : B
   -- J0 = IV || 0x00000001 (for 96-bit IV)
   let mut j0 := ByteArray.mkEmpty 16
   for i in [:12] do
+    -- Safe: iv is 12 bytes; i ranges over [0, 12)
     j0 := j0.push (iv.get! i)
   j0 := j0.push 0x00
   j0 := j0.push 0x00
@@ -254,14 +262,8 @@ def decrypt (key : ByteArray) (iv : ByteArray) (ciphertext : ByteArray) (aad : B
   let s := ghash h aad ciphertext
   let computedTag := xorBytes s tagPre
 
-  -- Constant-time comparison (well, as constant-time as we can in pure Lean)
-  let mut tagOk := true
-  if tag.size != 16 || computedTag.size != 16 then
-    tagOk := false
-  else
-    for i in [:16] do
-      if tag.get! i != computedTag.get! i then
-        tagOk := false
+  -- Constant-time tag comparison via XOR accumulation (no early exit)
+  let tagOk := LeanTLS.Utils.constantTimeEq computedTag tag
 
   if !tagOk then
     return none
@@ -277,6 +279,7 @@ def decrypt (key : ByteArray) (iv : ByteArray) (ciphertext : ByteArray) (aad : B
     let keystream := LeanTLS.Crypto.AES.encryptBlock key counter
     let off := i * 16
     for j in [:16] do
+      -- Safe: off + j < fullBlocks*16 <= ciphertext.size; keystream is 16 bytes
       plaintext := plaintext.push (ciphertext.get! (off + j) ^^^ keystream.get! j)
 
   if remainder > 0 then
@@ -284,60 +287,24 @@ def decrypt (key : ByteArray) (iv : ByteArray) (ciphertext : ByteArray) (aad : B
     let keystream := LeanTLS.Crypto.AES.encryptBlock key counter
     let off := fullBlocks * 16
     for j in [:remainder] do
+      -- Safe: off + j < ciphertext.size; j < remainder <= 15 < keystream.size
       plaintext := plaintext.push (ciphertext.get! (off + j) ^^^ keystream.get! j)
 
   return some plaintext
 
 /-! ## Test Vectors (NIST SP 800-38D) -/
 
-/-- Convert a hex character to its 4-bit value. -/
-private def hexCharToNibble (c : Char) : UInt8 :=
-  if '0' <= c && c <= '9' then (c.toNat - '0'.toNat).toUInt8
-  else if 'a' <= c && c <= 'f' then (c.toNat - 'a'.toNat + 10).toUInt8
-  else if 'A' <= c && c <= 'F' then (c.toNat - 'A'.toNat + 10).toUInt8
-  else 0
-
-/-- Convert a hex string to ByteArray. -/
-private def hexToBytes (hex : String) : ByteArray :=
-  let chars := hex.toList
-  go chars ByteArray.empty
-where
-  go (cs : List Char) (acc : ByteArray) : ByteArray :=
-    match cs with
-    | c1 :: c2 :: rest =>
-      let nibbleHi := hexCharToNibble c1
-      let nibbleLo := hexCharToNibble c2
-      let byte : UInt8 := (nibbleHi <<< 4) ||| nibbleLo
-      go rest (acc.push byte)
-    | _ => acc
-
-/-- Convert a single byte to two hex characters. -/
-private def byteToHex (b : UInt8) : String :=
-  let hexChars := "0123456789abcdef"
-  let hi := (b >>> 4).toNat
-  let lo := (b &&& 0x0f).toNat
-  let c1 := hexChars.get ⟨hi⟩
-  let c2 := hexChars.get ⟨lo⟩
-  String.mk [c1, c2]
-
-/-- Convert a ByteArray to a hex string. -/
-private def bytesToHex (bs : ByteArray) : String := Id.run do
-  let mut result := ""
-  for i in [:bs.size] do
-    result := result ++ byteToHex (bs.get! i)
-  return result
-
 /-- Run a single GCM encrypt test case. Returns true if passed. -/
 private def testEncrypt (name : String) (keyHex : String) (ivHex : String)
     (ptHex : String) (aadHex : String)
     (expectedCtHex : String) (expectedTagHex : String) : IO Bool := do
-  let key := hexToBytes keyHex
-  let iv := hexToBytes ivHex
-  let pt := hexToBytes ptHex
-  let aad := hexToBytes aadHex
+  let key := LeanTLS.Utils.hexToBytes keyHex
+  let iv := LeanTLS.Utils.hexToBytes ivHex
+  let pt := LeanTLS.Utils.hexToBytes ptHex
+  let aad := LeanTLS.Utils.hexToBytes aadHex
   let (ct, tag) := encrypt key iv pt aad
-  let ctHex := bytesToHex ct
-  let tagHex := bytesToHex tag
+  let ctHex := LeanTLS.Utils.bytesToHex ct
+  let tagHex := LeanTLS.Utils.bytesToHex tag
   let ctOk := ctHex == expectedCtHex
   let tagOk := tagHex == expectedTagHex
   if ctOk && tagOk then
@@ -354,14 +321,14 @@ private def testEncrypt (name : String) (keyHex : String) (ivHex : String)
 private def testDecrypt (name : String) (keyHex : String) (ivHex : String)
     (ctHex : String) (aadHex : String) (tagHex : String)
     (expectedPtHex : String) : IO Bool := do
-  let key := hexToBytes keyHex
-  let iv := hexToBytes ivHex
-  let ct := hexToBytes ctHex
-  let aad := hexToBytes aadHex
-  let tag := hexToBytes tagHex
+  let key := LeanTLS.Utils.hexToBytes keyHex
+  let iv := LeanTLS.Utils.hexToBytes ivHex
+  let ct := LeanTLS.Utils.hexToBytes ctHex
+  let aad := LeanTLS.Utils.hexToBytes aadHex
+  let tag := LeanTLS.Utils.hexToBytes tagHex
   match decrypt key iv ct aad tag with
   | some pt =>
-    let ptResultHex := bytesToHex pt
+    let ptResultHex := LeanTLS.Utils.bytesToHex pt
     if ptResultHex == expectedPtHex then
       IO.println s!"[PASS] GCM Decrypt {name}"
       return true
@@ -454,11 +421,11 @@ def runTests : IO Bool := do
 
   -- Test: Decrypt with wrong tag should fail
   let badResult := decrypt
-    (hexToBytes "00000000000000000000000000000000")
-    (hexToBytes "000000000000000000000000")
-    (hexToBytes "0388dace60b6a392f328c2b971b2fe78")
+    (LeanTLS.Utils.hexToBytes "00000000000000000000000000000000")
+    (LeanTLS.Utils.hexToBytes "000000000000000000000000")
+    (LeanTLS.Utils.hexToBytes "0388dace60b6a392f328c2b971b2fe78")
     ByteArray.empty
-    (hexToBytes "0000000000000000000000000000dead")  -- wrong tag
+    (LeanTLS.Utils.hexToBytes "0000000000000000000000000000dead")  -- wrong tag
   match badResult with
   | none =>
     IO.println "[PASS] GCM Decrypt rejects bad tag"

@@ -6,6 +6,8 @@
   State indexing: state[row + 4 * col] for row in 0..3, col in 0..3.
 -/
 
+import LeanTLS.Utils
+
 set_option autoImplicit false
 
 namespace LeanTLS.Crypto.AES
@@ -34,6 +36,7 @@ private def sbox : Array UInt8 := #[
 ]
 
 /-- Apply S-Box substitution to a single byte. -/
+-- Safe: b.toNat is in [0, 255]; sbox has exactly 256 entries
 private def subByte (b : UInt8) : UInt8 :=
   sbox[b.toNat]!
 
@@ -69,10 +72,12 @@ private def gmul (a : UInt8) (b : UInt8) : UInt8 :=
 -/
 
 /-- Get a byte from the state at (row, col). -/
+-- Safe: row in [0,3], col in [0,3], so row + 4*col in [0, 15]; state is always 16 bytes
 private def stateGet (state : ByteArray) (row : Nat) (col : Nat) : UInt8 :=
   state.get! (row + 4 * col)
 
 /-- Set a byte in the state at (row, col). -/
+-- Safe: same invariant as stateGet — index in [0, 15], state is 16 bytes
 private def stateSet (state : ByteArray) (row : Nat) (col : Nat) (val : UInt8) : ByteArray :=
   state.set! (row + 4 * col) val
 
@@ -82,6 +87,7 @@ private def stateSet (state : ByteArray) (row : Nat) (col : Nat) (val : UInt8) :
 private def subBytes (state : ByteArray) : ByteArray := Id.run do
   let mut s := state
   for i in [:16] do
+    -- Safe: state is always 16 bytes; i ranges over [0, 16)
     s := s.set! i (subByte (s.get! i))
   return s
 
@@ -202,11 +208,13 @@ private def setWord (expanded : Array UInt8) (i : Nat) (w : Array UInt8) : Array
   e.set! (off + 3) (w[3]!)
 
 /-- Expand a 16-byte AES-128 key into 44 words (176 bytes). -/
+-- All .get!/.set! indices are within the 176-byte expanded array and 16-byte key
 private def keyExpansion (key : ByteArray) : Array UInt8 := Id.run do
   -- Initialize with 176 zero bytes
   let mut expanded : Array UInt8 := Array.mkArray 176 0
   -- Copy the original key into the first 4 words (16 bytes)
   for i in [:16] do
+    -- Safe: key is 16 bytes; i ranges over [0, 16)
     expanded := expanded.set! i (key.get! i)
   -- Generate remaining 40 words
   for i in [4:44] do
@@ -245,53 +253,16 @@ def encryptBlock (key : ByteArray) (plaintext : ByteArray) : ByteArray := Id.run
 
 /-! ## Test Vectors -/
 
-/-- Convert a hex character to its 4-bit value. -/
-private def hexCharToNibble (c : Char) : UInt8 :=
-  if '0' <= c && c <= '9' then (c.toNat - '0'.toNat).toUInt8
-  else if 'a' <= c && c <= 'f' then (c.toNat - 'a'.toNat + 10).toUInt8
-  else if 'A' <= c && c <= 'F' then (c.toNat - 'A'.toNat + 10).toUInt8
-  else 0
-
-/-- Convert a hex string (no spaces, lowercase or uppercase) to ByteArray. -/
-private def hexToBytes (hex : String) : ByteArray :=
-  let chars := hex.toList
-  go chars ByteArray.empty
-where
-  go (cs : List Char) (acc : ByteArray) : ByteArray :=
-    match cs with
-    | c1 :: c2 :: rest =>
-      let nibbleHi := hexCharToNibble c1
-      let nibbleLo := hexCharToNibble c2
-      let byte : UInt8 := (nibbleHi <<< 4) ||| nibbleLo
-      go rest (acc.push byte)
-    | _ => acc
-
-/-- Convert a single byte to two hex characters. -/
-private def byteToHex (b : UInt8) : String :=
-  let hexChars := "0123456789abcdef"
-  let hi := (b >>> 4).toNat
-  let lo := (b &&& 0x0f).toNat
-  let c1 := hexChars.get ⟨hi⟩
-  let c2 := hexChars.get ⟨lo⟩
-  String.mk [c1, c2]
-
-/-- Convert a ByteArray to a hex string. -/
-private def bytesToHex (bs : ByteArray) : String := Id.run do
-  let mut result := ""
-  for i in [:bs.size] do
-    result := result ++ byteToHex (bs.get! i)
-  return result
-
 /-- Run AES-128 test vectors. Returns true if all tests pass. -/
 def runTests : IO Bool := do
   let mut allPassed := true
 
   -- Test 1: FIPS 197 Appendix B
-  let key1 := hexToBytes "2b7e151628aed2a6abf7158809cf4f3c"
-  let pt1 := hexToBytes "3243f6a8885a308d313198a2e0370734"
+  let key1 := LeanTLS.Utils.hexToBytes "2b7e151628aed2a6abf7158809cf4f3c"
+  let pt1 := LeanTLS.Utils.hexToBytes "3243f6a8885a308d313198a2e0370734"
   let expected1 := "3925841d02dc09fbdc118597196a0b32"
   let ct1 := encryptBlock key1 pt1
-  let result1 := bytesToHex ct1
+  let result1 := LeanTLS.Utils.bytesToHex ct1
   if result1 == expected1 then
     IO.println s!"[PASS] FIPS 197 Appendix B: {result1}"
   else
@@ -299,11 +270,11 @@ def runTests : IO Bool := do
     allPassed := false
 
   -- Test 2: NIST AES-128 ECB (all zeros)
-  let key2 := hexToBytes "00000000000000000000000000000000"
-  let pt2 := hexToBytes "00000000000000000000000000000000"
+  let key2 := LeanTLS.Utils.hexToBytes "00000000000000000000000000000000"
+  let pt2 := LeanTLS.Utils.hexToBytes "00000000000000000000000000000000"
   let expected2 := "66e94bd4ef8a2c3b884cfa59ca342b2e"
   let ct2 := encryptBlock key2 pt2
-  let result2 := bytesToHex ct2
+  let result2 := LeanTLS.Utils.bytesToHex ct2
   if result2 == expected2 then
     IO.println s!"[PASS] NIST AES-128 ECB (zeros): {result2}"
   else

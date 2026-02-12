@@ -1,3 +1,5 @@
+import LeanTLS.Utils
+
 set_option autoImplicit false
 
 namespace LeanTLS.Crypto.X25519
@@ -12,6 +14,17 @@ over GF(2^255 - 19) using Lean's arbitrary-precision `Nat`.
 -- ============================================================================
 -- Field arithmetic over GF(2^255 - 19)
 -- ============================================================================
+
+/-! ## Security Note
+
+    This implementation uses Lean's arbitrary-precision `Nat` for field arithmetic.
+    This is NOT constant-time — operation timing may leak information about secret
+    scalar values. For production use requiring side-channel resistance, a limb-based
+    implementation using fixed-width integers (e.g., 5x51-bit limbs in UInt64) is
+    recommended. The current implementation is functionally correct but should only
+    be used where timing attacks are not a concern (e.g., testing, non-adversarial
+    environments).
+-/
 
 /-- The prime p = 2^255 - 19 defining the field GF(p). -/
 def p : Nat := 2 ^ 255 - 19
@@ -79,44 +92,14 @@ def encodeLE32 (n : Nat) : ByteArray :=
   termination_by 32 - i
   go 0 n ByteArray.empty
 
-/-- Convert a hex character to its numeric value. -/
-def hexCharToNat (c : Char) : Nat :=
-  if '0' <= c && c <= '9' then c.toNat - '0'.toNat
-  else if 'a' <= c && c <= 'f' then c.toNat - 'a'.toNat + 10
-  else if 'A' <= c && c <= 'F' then c.toNat - 'A'.toNat + 10
-  else 0
-
 /-- Convert a hex string to a ByteArray. -/
-def hexToBytes (s : String) : ByteArray :=
-  let chars := s.toList
-  let rec go (cs : List Char) (acc : ByteArray) : ByteArray :=
-    match cs with
-    | c1 :: c2 :: rest =>
-      let byte := (hexCharToNat c1 * 16 + hexCharToNat c2).toUInt8
-      go rest (acc.push byte)
-    | _ => acc
-  go chars ByteArray.empty
-
-/-- Convert a nibble (0-15) to its hex character. -/
-def nibbleToHexChar (n : Nat) : Char :=
-  if n < 10 then Char.ofNat ('0'.toNat + n)
-  else Char.ofNat ('a'.toNat + n - 10)
+def hexToBytes := LeanTLS.Utils.hexToBytes
 
 /-- Convert a single byte to a two-character hex string. -/
-def byteToHex (b : UInt8) : String :=
-  let hi := b.toNat / 16
-  let lo := b.toNat % 16
-  String.mk [nibbleToHexChar hi, nibbleToHexChar lo]
+def byteToHex := LeanTLS.Utils.byteToHex
 
 /-- Convert a ByteArray to a hex string. -/
-def bytesToHex (bs : ByteArray) : String :=
-  let rec go (i : Nat) (acc : String) : String :=
-    if h : i < bs.size then
-      go (i + 1) (acc ++ byteToHex (bs[i]'h))
-    else
-      acc
-  termination_by bs.size - i
-  go 0 ""
+def bytesToHex := LeanTLS.Utils.bytesToHex
 
 -- ============================================================================
 -- Scalar clamping
@@ -129,6 +112,7 @@ def bytesToHex (bs : ByteArray) : String :=
 def clamp (k : ByteArray) : ByteArray :=
   if k.size < 32 then k
   else
+    -- Safe: k.size >= 32 is guaranteed by the guard above; indices 0, 31 are in bounds
     let k := k.set! 0 (k.get! 0 &&& 248)
     let k := k.set! 31 (k.get! 31 &&& 127)
     let k := k.set! 31 (k.get! 31 ||| 64)
@@ -143,6 +127,7 @@ def clamp (k : ByteArray) : ByteArray :=
 def decodeUCoordinate (bs : ByteArray) : Nat :=
   if bs.size < 32 then decodeLE bs
   else
+    -- Safe: bs.size >= 32 is guaranteed by the guard above; index 31 is in bounds
     let bs' := bs.set! 31 (bs.get! 31 &&& 127)
     decodeLE bs'
 

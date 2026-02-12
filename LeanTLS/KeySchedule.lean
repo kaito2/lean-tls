@@ -1,5 +1,6 @@
 import LeanTLS.Crypto.HKDF
 import LeanTLS.Crypto.SHA256
+import LeanTLS.Utils
 
 set_option autoImplicit false
 
@@ -34,33 +35,7 @@ private def zeroKey : ByteArray :=
   ByteArray.mk (Array.mkArray hashLen 0)
 
 -- ============================================================================
--- Section 2: Hex utility helpers
--- ============================================================================
-
-/-- Convert a single hex character to its numeric value (0-15).
-    Returns 0 for invalid characters. -/
-private def hexCharToNibble (c : Char) : UInt8 :=
-  if '0' ≤ c ∧ c ≤ '9' then (c.toNat - '0'.toNat).toUInt8
-  else if 'a' ≤ c ∧ c ≤ 'f' then (c.toNat - 'a'.toNat + 10).toUInt8
-  else if 'A' ≤ c ∧ c ≤ 'F' then (c.toNat - 'A'.toNat + 10).toUInt8
-  else 0
-
-/-- Convert a hexadecimal string to a ByteArray.
-    The string must have an even number of characters. -/
-private def hexToBytes (s : String) : ByteArray :=
-  let chars := s.toList
-  let pairs := go chars #[]
-  ByteArray.mk pairs
-where
-  go : List Char → Array UInt8 → Array UInt8
-    | c1 :: c2 :: rest, acc =>
-      let hi := hexCharToNibble c1
-      let lo := hexCharToNibble c2
-      go rest (acc.push ((hi <<< 4) ||| lo))
-    | _, acc => acc
-
--- ============================================================================
--- Section 3: HKDF-Expand-Label (RFC 8446 Section 7.1)
+-- Section 2: HKDF-Expand-Label (RFC 8446 Section 7.1)
 -- ============================================================================
 
 /-- HKDF-Expand-Label(Secret, Label, Context, Length) = HKDF-Expand(Secret, HkdfLabel, Length)
@@ -235,7 +210,7 @@ def runTests : IO Bool := do
   -- Test 3: Handshake Secret
   -- shared_secret from X25519 (RFC 8448 Simple 1-RTT Handshake)
   -- -----------------------------------------------------------------------
-  let sharedSecret := hexToBytes "8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d"
+  let sharedSecret := LeanTLS.Utils.hexToBytes "8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d"
   let expectedHS := "1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac"
   let hs := handshakeSecret es sharedSecret
   let resultHS := LeanTLS.Crypto.SHA256.toHex hs
@@ -251,7 +226,7 @@ def runTests : IO Bool := do
   -- Test 4: Client and Server handshake traffic secrets
   -- transcript_hash = hash of ClientHello...ServerHello from RFC 8448
   -- -----------------------------------------------------------------------
-  let transcriptHashHS := hexToBytes "860c06edc07858ee8e78f0e7428c58edd6b43f2ca3e6e95f02ed063cf0e1cad8"
+  let transcriptHashHS := LeanTLS.Utils.hexToBytes "860c06edc07858ee8e78f0e7428c58edd6b43f2ca3e6e95f02ed063cf0e1cad8"
 
   let expectedCHTS := "b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21"
   let chts := clientHandshakeTrafficSecret hs transcriptHashHS
