@@ -1,4 +1,5 @@
 import LeanTLS.Crypto.SHA256
+import LeanTLS.Crypto.SHA384
 import LeanTLS.Crypto.HMAC
 import LeanTLS.Utils
 
@@ -86,6 +87,28 @@ def HandshakeType.fromByte (b : UInt8) : Option HandshakeType :=
   | 15 => some .certificateVerify
   | 20 => some .finished
   | _  => none
+
+-- ============================================================================
+-- Section 2b: Cipher Suite (RFC 8446 Section B.4)
+-- ============================================================================
+
+/-- Supported TLS 1.3 cipher suites. -/
+inductive CipherSuite where
+  | aes128gcmSha256 : CipherSuite  -- 0x1301
+  | aes256gcmSha384 : CipherSuite  -- 0x1302
+  deriving BEq, Repr
+
+/-- Convert a CipherSuite to its wire format UInt16 value. -/
+def CipherSuite.toUInt16 (cs : CipherSuite) : UInt16 :=
+  match cs with
+  | .aes128gcmSha256 => 0x1301
+  | .aes256gcmSha384 => 0x1302
+
+/-- Parse a UInt16 into a CipherSuite, or `none` if unrecognized. -/
+def CipherSuite.fromUInt16 (v : UInt16) : Option CipherSuite :=
+  if v == 0x1301 then some .aes128gcmSha256
+  else if v == 0x1302 then some .aes256gcmSha384
+  else none
 
 -- ============================================================================
 -- Section 3: Handshake Message wrapper
@@ -181,7 +204,7 @@ structure ClientHelloParams where
   sessionId : ByteArray       -- legacy session ID (32 bytes for compatibility)
 
 /-- Build a ClientHello message for TLS 1.3 with:
-    - cipher_suites: [TLS_AES_128_GCM_SHA256] (0x1301)
+    - cipher_suites: [TLS_AES_256_GCM_SHA384 (0x1302), TLS_AES_128_GCM_SHA256 (0x1301)]
     - supported_versions extension: [TLS 1.3 (0x0304)]
     - key_share extension: x25519 public key
     - supported_groups extension: [x25519 (0x001d)]
@@ -195,8 +218,8 @@ def buildClientHello (params : ClientHelloParams) (publicKey : ByteArray) (hostn
   let body := body ++ params.random
   -- legacy_session_id: length (1 byte) + session_id
   let body := body ++ ByteArray.mk #[params.sessionId.size.toUInt8] ++ params.sessionId
-  -- cipher_suites: length (2 bytes) + TLS_AES_128_GCM_SHA256 (0x1301)
-  let body := body ++ encodeUInt16BE 0x0002 ++ encodeUInt16BE 0x1301
+  -- cipher_suites: length (2 bytes) + TLS_AES_128_GCM_SHA256 (0x1301) + TLS_AES_256_GCM_SHA384 (0x1302)
+  let body := body ++ encodeUInt16BE 0x0004 ++ encodeUInt16BE 0x1301 ++ encodeUInt16BE 0x1302
   -- legacy_compression_methods: length (1 byte) + null (0x00)
   let body := body ++ ByteArray.mk #[0x01, 0x00]
   -- extensions
@@ -287,8 +310,8 @@ def parseServerHello (payload : ByteArray) : Option ServerHelloData := do
       if pos + 2 > payload.size then none
       else
         let cipherSuite ← decodeUInt16BE payload pos
-        -- Validate cipher suite is TLS_AES_128_GCM_SHA256 (0x1301)
-        if cipherSuite != 0x1301 then none
+        -- Validate cipher suite is TLS_AES_128_GCM_SHA256 (0x1301) or TLS_AES_256_GCM_SHA384 (0x1302)
+        if cipherSuite != 0x1301 && cipherSuite != 0x1302 then none
         else
           pos := pos + 2
           -- compression_method: 1 byte (skip)
@@ -327,6 +350,28 @@ def buildFinishedVerifyData (finishedKey : ByteArray) (transcriptHash : ByteArra
     against the expected value computed from the finished_key and transcript_hash. -/
 def verifyFinished (finishedKey : ByteArray) (transcriptHash : ByteArray) (verifyData : ByteArray) : Bool :=
   let expected := buildFinishedVerifyData finishedKey transcriptHash
+  LeanTLS.Utils.constantTimeEq expected verifyData
+
+-- ============================================================================
+-- Section 7b: Cipher-suite-aware Finished and transcript hash
+-- ============================================================================
+
+/-- Compute the transcript hash using the hash algorithm for the given cipher suite. -/
+def transcriptHashForSuite (suite : CipherSuite) (messages : Array ByteArray) : ByteArray :=
+  let concatenated := messages.foldl (init := ByteArray.empty) (· ++ ·)
+  match suite with
+  | .aes128gcmSha256 => LeanTLS.Crypto.SHA256.hash concatenated
+  | .aes256gcmSha384 => LeanTLS.Crypto.SHA384.hash concatenated
+
+/-- Build Finished verify_data using the HMAC for the given cipher suite. -/
+def buildFinishedVerifyDataForSuite (suite : CipherSuite) (finishedKey : ByteArray) (transcriptHash : ByteArray) : ByteArray :=
+  match suite with
+  | .aes128gcmSha256 => LeanTLS.Crypto.HMAC.hmacSHA256 finishedKey transcriptHash
+  | .aes256gcmSha384 => LeanTLS.Crypto.HMAC.hmacSHA384 finishedKey transcriptHash
+
+/-- Verify a Finished message using the HMAC for the given cipher suite. -/
+def verifyFinishedForSuite (suite : CipherSuite) (finishedKey : ByteArray) (transcriptHash : ByteArray) (verifyData : ByteArray) : Bool :=
+  let expected := buildFinishedVerifyDataForSuite suite finishedKey transcriptHash
   LeanTLS.Utils.constantTimeEq expected verifyData
 
 -- ============================================================================
@@ -424,31 +469,50 @@ def runTests : IO Bool := do
     IO.println "    legacy_version = 0x0303: FAILED (too short)"
     test2Passed := false
 
-  -- Check that cipher_suites contains 0x1301
-  -- Position: 4 (ver) + 2 (ver) + 32 (random) + 1 (sid len) + 32 (sid) = 71 for cipher_suites length
+  -- Check that cipher_suites contains both 0x1302 and 0x1301
+  -- Position: 4 (header) + 2 (ver) + 32 (random) + 1 (sid len) + 32 (sid) = 71 for cipher_suites length
   let cipherSuitesOffset := 4 + 2 + 32 + 1 + 32  -- = 71
-  if chBytes.size > cipherSuitesOffset + 3 then
-    match decodeUInt16BE chBytes (cipherSuitesOffset + 2) with
-    | some cs =>
-      if cs == 0x1301 then
-        IO.println "    cipher_suite contains 0x1301: OK"
+  if chBytes.size > cipherSuitesOffset + 5 then
+    match decodeUInt16BE chBytes cipherSuitesOffset with
+    | some csLen =>
+      if csLen == 0x0004 then
+        IO.println "    cipher_suites length = 4: OK"
       else
-        IO.println s!"    cipher_suite contains 0x1301: FAILED (got {cs})"
+        IO.println s!"    cipher_suites length = 4: FAILED (got {csLen})"
         test2Passed := false
     | none =>
-      IO.println "    cipher_suite contains 0x1301: FAILED (could not decode)"
+      IO.println "    cipher_suites length: FAILED (could not decode)"
+      test2Passed := false
+    match decodeUInt16BE chBytes (cipherSuitesOffset + 2) with
+    | some cs1 =>
+      if cs1 == 0x1301 then
+        IO.println "    first cipher_suite is 0x1301 (TLS_AES_128_GCM_SHA256): OK"
+      else
+        IO.println s!"    first cipher_suite is 0x1301: FAILED (got {cs1})"
+        test2Passed := false
+    | none =>
+      IO.println "    first cipher_suite: FAILED (could not decode)"
+      test2Passed := false
+    match decodeUInt16BE chBytes (cipherSuitesOffset + 4) with
+    | some cs2 =>
+      if cs2 == 0x1302 then
+        IO.println "    second cipher_suite is 0x1302 (TLS_AES_256_GCM_SHA384): OK"
+      else
+        IO.println s!"    second cipher_suite is 0x1302: FAILED (got {cs2})"
+        test2Passed := false
+    | none =>
+      IO.println "    second cipher_suite: FAILED (could not decode)"
       test2Passed := false
   else
-    IO.println "    cipher_suite contains 0x1301: FAILED (too short)"
+    IO.println "    cipher_suites: FAILED (too short)"
     test2Passed := false
 
   -- Check that extensions include supported_versions with 0x0304
-  -- Search for extension type 0x002b in the extensions area
-  -- After cipher_suites: 2 (len) + 2 (suite) = 4 bytes
+  -- After cipher_suites: 2 (len) + 4 (two suites) = 6 bytes
   -- compression_methods: 1 (len) + 1 (null) = 2 bytes
   -- extensions_length: 2 bytes
-  -- extensions start at: cipherSuitesOffset + 4 + 2 + 2
-  let extTotalOffset := cipherSuitesOffset + 4 + 2 + 2  -- = 79
+  -- extensions start at: cipherSuitesOffset + 6 + 2 + 2
+  let extTotalOffset := cipherSuitesOffset + 6 + 2 + 2  -- = 83
   -- Find 0x002b in the extensions
   let foundSV := go chBytes extTotalOffset chBytes.size false
   if foundSV then

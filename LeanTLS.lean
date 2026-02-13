@@ -18,6 +18,6 @@ import LeanTLS.ASN1
 import LeanTLS.X509
 import LeanTLS.CertVerify
 import LeanTLS.PEM
--- CAStore is available via `import LeanTLS.CAStore` but excluded from the
--- umbrella import to avoid a compiled-binary initialisation crash (segfault)
--- in Lean 4.16.0.  Users who need CAStore can import it directly.
+-- import LeanTLS.CAStore  -- excluded: native codegen crash in Lean 4.16.0
+import LeanTLS.ChainVerify
+import LeanTLS.KeyUpdate

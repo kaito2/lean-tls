@@ -1,4 +1,5 @@
 import LeanTLS.Crypto.GCM
+import LeanTLS.Crypto.GCM256
 import LeanTLS.Errors
 import LeanTLS.Utils
 
@@ -299,6 +300,76 @@ def decryptRecord (state : RecordEncryptionState) (rec : TLSRecord)
         seqNum := state.seqNum + 1
       }
       some (ct, content, newState)
+
+/-! ## AES-256-GCM Encrypted Record Handling -/
+
+/-- Encrypt a TLS inner plaintext into an encrypted record using AES-256-GCM.
+    Same as `encryptRecord` but uses AES-256-GCM (32-byte key). -/
+def encryptRecord256 (state : RecordEncryptionState) (contentType : ContentType) (content : ByteArray)
+    : Option (TLSRecord × RecordEncryptionState) := do
+  if state.seqNum == (18446744073709551615 : UInt64) then
+    none
+  let innerPlaintext := content.push contentType.toByte
+  let nonce := buildNonce state.iv state.seqNum
+  let encryptedLen := innerPlaintext.size + 16
+  let aad := buildEncryptedRecordHeader encryptedLen
+  let (ciphertext, tag) := LeanTLS.Crypto.GCM256.encrypt state.key nonce innerPlaintext aad
+  let fragment := ciphertext ++ tag
+  let record : TLSRecord := {
+    contentType := .applicationData
+    legacyVersion := 0x0303
+    fragment := fragment
+  }
+  let newState : RecordEncryptionState := {
+    key := state.key
+    iv := state.iv
+    seqNum := state.seqNum + 1
+  }
+  some (record, newState)
+
+/-- Decrypt an encrypted TLS record using AES-256-GCM.
+    Same as `decryptRecord` but uses AES-256-GCM (32-byte key). -/
+def decryptRecord256 (state : RecordEncryptionState) (rec : TLSRecord)
+    : Option (ContentType × ByteArray × RecordEncryptionState) := do
+  if state.seqNum == (18446744073709551615 : UInt64) then
+    none
+  else if rec.contentType != .applicationData then
+    none
+  else
+    if rec.fragment.size < 17 then
+      none
+    else
+      let ciphertextLen := rec.fragment.size - 16
+      let ciphertext := rec.fragment.extract 0 ciphertextLen
+      let tag := rec.fragment.extract ciphertextLen rec.fragment.size
+      let nonce := buildNonce state.iv state.seqNum
+      let aad := buildEncryptedRecordHeader rec.fragment.size
+      let innerPlaintext ← LeanTLS.Crypto.GCM256.decrypt state.key nonce ciphertext aad tag
+      let (ct, content) ← parseInnerPlaintext innerPlaintext
+      let newState : RecordEncryptionState := {
+        key := state.key
+        iv := state.iv
+        seqNum := state.seqNum + 1
+      }
+      some (ct, content, newState)
+
+/-- Encrypt a TLS record, auto-dispatching between AES-128-GCM and AES-256-GCM
+    based on the key size (16 bytes = AES-128, 32 bytes = AES-256). -/
+def encryptRecordAuto (state : RecordEncryptionState) (contentType : ContentType) (content : ByteArray)
+    : Option (TLSRecord × RecordEncryptionState) :=
+  if state.key.size == 32 then
+    encryptRecord256 state contentType content
+  else
+    encryptRecord state contentType content
+
+/-- Decrypt a TLS record, auto-dispatching between AES-128-GCM and AES-256-GCM
+    based on the key size (16 bytes = AES-128, 32 bytes = AES-256). -/
+def decryptRecordAuto (state : RecordEncryptionState) (rec : TLSRecord)
+    : Option (ContentType × ByteArray × RecordEncryptionState) :=
+  if state.key.size == 32 then
+    decryptRecord256 state rec
+  else
+    decryptRecord state rec
 
 /-! ## Tests -/
 

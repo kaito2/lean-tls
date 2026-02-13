@@ -72,7 +72,16 @@ def main : IO Unit := do
   let gcm256Ok ← LeanTLS.Crypto.GCM256.runTests
   if !gcm256Ok then allOk := false
 
-  -- CAStore tests run separately (not included here to keep test binary simple)
+  -- CAStore tests excluded from compiled binary due to Lean 4.16.0 native codegen issue.
+  -- Run via: lake env lean --run Tests/Main.lean (interpreted) to include CAStore tests.
+
+  IO.println "Running ChainVerify tests..."
+  let chainOk ← LeanTLS.ChainVerify.runTests
+  if !chainOk then allOk := false
+
+  IO.println "Running KeyUpdate tests..."
+  let kuOk ← LeanTLS.KeyUpdate.runTests
+  if !kuOk then allOk := false
 
   if allOk then
     IO.println "All tests passed!"

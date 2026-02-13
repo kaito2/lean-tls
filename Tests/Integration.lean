@@ -56,7 +56,7 @@ def main : IO Unit := do
 
   -- Step 2: Perform TLS 1.3 handshake WITH certificate verification
   IO.println "[2] Starting TLS 1.3 handshake (certificate verification ENABLED) ..."
-  let conn ← LeanTLS.TlsConnection.connect stream host { skipCertVerify := false }
+  let conn ← LeanTLS.TlsConnection.connect stream host { verifyMode := .verifyFull }
   IO.println "[2] TLS 1.3 handshake with certificate verification completed successfully!"
 
   -- Step 3: Send HTTP GET request

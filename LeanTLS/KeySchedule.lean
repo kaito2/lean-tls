@@ -1,5 +1,6 @@
 import LeanTLS.Crypto.HKDF
 import LeanTLS.Crypto.SHA256
+import LeanTLS.Crypto.SHA384
 import LeanTLS.Utils
 
 set_option autoImplicit false
@@ -169,7 +170,85 @@ def deriveTrafficKeys (secret : ByteArray) : TrafficKeys :=
   { key := trafficKey secret, iv := trafficIV secret }
 
 -- ============================================================================
--- Section 8: Test vectors (RFC 8448 - Example Handshake Traces for TLS 1.3)
+-- Section 8: SHA-384 Key Schedule (for TLS_AES_256_GCM_SHA384)
+-- ============================================================================
+
+/-- SHA-384 output length in bytes. -/
+private def hashLen384 : Nat := 48
+
+/-- AES-256-GCM key length in bytes. -/
+private def aes256KeyLen : Nat := 32
+
+/-- 48 zero bytes, used as IKM when no PSK or as the zero input for SHA-384. -/
+private def zeroKey384 : ByteArray :=
+  ByteArray.mk (Array.mkArray hashLen384 0)
+
+/-- HKDF-Expand-Label using SHA-384. -/
+def hkdfExpandLabelSHA384 (secret : ByteArray) (label : String) (context : ByteArray) (length : Nat) : ByteArray :=
+  let fullLabel := ("tls13 " ++ label).toUTF8
+  let hkdfLabel := ByteArray.mkEmpty (2 + 1 + fullLabel.size + 1 + context.size)
+  let hkdfLabel := hkdfLabel.push (length / 256).toUInt8
+  let hkdfLabel := hkdfLabel.push (length % 256).toUInt8
+  let hkdfLabel := hkdfLabel.push fullLabel.size.toUInt8
+  let hkdfLabel := hkdfLabel ++ fullLabel
+  let hkdfLabel := hkdfLabel.push context.size.toUInt8
+  let hkdfLabel := hkdfLabel ++ context
+  LeanTLS.Crypto.HKDF.expandSHA384 secret hkdfLabel length
+
+/-- Derive-Secret using SHA-384. -/
+def deriveSecretSHA384 (secret : ByteArray) (label : String) (transcriptHash : ByteArray) : ByteArray :=
+  hkdfExpandLabelSHA384 secret label transcriptHash hashLen384
+
+/-- Compute the Early Secret using SHA-384. -/
+def earlySecretSHA384 (psk : ByteArray := zeroKey384) : ByteArray :=
+  LeanTLS.Crypto.HKDF.extractSHA384 ByteArray.empty psk
+
+/-- Derive the Handshake Secret using SHA-384. -/
+def handshakeSecretSHA384 (earlySecret : ByteArray) (sharedSecret : ByteArray) : ByteArray :=
+  let emptyHash := LeanTLS.Crypto.SHA384.hash ByteArray.empty
+  let derived := deriveSecretSHA384 earlySecret "derived" emptyHash
+  LeanTLS.Crypto.HKDF.extractSHA384 derived sharedSecret
+
+/-- Derive client handshake traffic secret using SHA-384. -/
+def clientHandshakeTrafficSecretSHA384 (hsSecret : ByteArray) (transcriptHash : ByteArray) : ByteArray :=
+  deriveSecretSHA384 hsSecret "c hs traffic" transcriptHash
+
+/-- Derive server handshake traffic secret using SHA-384. -/
+def serverHandshakeTrafficSecretSHA384 (hsSecret : ByteArray) (transcriptHash : ByteArray) : ByteArray :=
+  deriveSecretSHA384 hsSecret "s hs traffic" transcriptHash
+
+/-- Derive the Master Secret using SHA-384. -/
+def masterSecretSHA384 (hsSecret : ByteArray) : ByteArray :=
+  let emptyHash := LeanTLS.Crypto.SHA384.hash ByteArray.empty
+  let derived := deriveSecretSHA384 hsSecret "derived" emptyHash
+  LeanTLS.Crypto.HKDF.extractSHA384 derived zeroKey384
+
+/-- Derive client application traffic secret using SHA-384. -/
+def clientAppTrafficSecretSHA384 (masterSecret : ByteArray) (transcriptHash : ByteArray) : ByteArray :=
+  deriveSecretSHA384 masterSecret "c ap traffic" transcriptHash
+
+/-- Derive server application traffic secret using SHA-384. -/
+def serverAppTrafficSecretSHA384 (masterSecret : ByteArray) (transcriptHash : ByteArray) : ByteArray :=
+  deriveSecretSHA384 masterSecret "s ap traffic" transcriptHash
+
+/-- Derive AES-256-GCM traffic key from a traffic secret using SHA-384. -/
+def trafficKeySHA384 (secret : ByteArray) : ByteArray :=
+  hkdfExpandLabelSHA384 secret "key" ByteArray.empty aes256KeyLen
+
+/-- Derive AES-256-GCM traffic IV from a traffic secret using SHA-384. -/
+def trafficIVSHA384 (secret : ByteArray) : ByteArray :=
+  hkdfExpandLabelSHA384 secret "iv" ByteArray.empty aes128IVLen
+
+/-- Derive the finished key from a base key using SHA-384. -/
+def finishedKeySHA384 (baseKey : ByteArray) : ByteArray :=
+  hkdfExpandLabelSHA384 baseKey "finished" ByteArray.empty hashLen384
+
+/-- Derive the AES-256-GCM traffic key and IV from a traffic secret. -/
+def deriveTrafficKeysSHA384 (secret : ByteArray) : TrafficKeys :=
+  { key := trafficKeySHA384 secret, iv := trafficIVSHA384 secret }
+
+-- ============================================================================
+-- Section 9: Test vectors (RFC 8448 - Example Handshake Traces for TLS 1.3)
 -- ============================================================================
 
 /-- Run TLS 1.3 Key Schedule test vectors from RFC 8448. Returns `true` if all tests pass. -/

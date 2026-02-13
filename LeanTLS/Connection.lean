@@ -4,7 +4,10 @@ import LeanTLS.KeySchedule
 import LeanTLS.Errors
 import LeanTLS.Crypto.X25519
 import LeanTLS.Crypto.SHA256
+import LeanTLS.Crypto.SHA384
 import LeanTLS.CertVerify
+import LeanTLS.ChainVerify
+import LeanTLS.KeyUpdate
 
 /-!
 # TLS 1.3 Connection (Integration API)
@@ -15,8 +18,14 @@ primitives into a usable interface.
 
 It exposes:
 - `IOStream`: Abstract byte-oriented I/O stream
-- `TlsConfig`: Configuration for TLS connections
+- `TlsConfig`: Configuration for TLS connections (with `VerifyMode`)
 - `TlsConnection`: Stateful TLS connection with `connect`, `send`, `recv`, `shutdown`
+
+Supports:
+- AES-128-GCM with SHA-256 (TLS_AES_128_GCM_SHA256, 0x1301)
+- AES-256-GCM with SHA-384 (TLS_AES_256_GCM_SHA384, 0x1302)
+- Certificate chain verification via ChainVerify
+- KeyUpdate post-handshake message handling
 -/
 
 set_option autoImplicit false
@@ -39,12 +48,26 @@ structure IOStream where
 -- Section 2: TLS Configuration
 -- ============================================================================
 
+/-- Certificate verification mode for TLS connections. -/
+inductive VerifyMode where
+  /-- No certificate verification. -/
+  | none : VerifyMode
+  /-- Verify the certificate chain against the CA store, but do not check hostname. -/
+  | verifyCA : VerifyMode
+  /-- Verify the certificate chain and check hostname matches. -/
+  | verifyFull : VerifyMode
+  deriving BEq, Repr
+
 /-- Configuration options for a TLS connection. -/
 structure TlsConfig where
-  /-- Server hostname (used in future SNI extension). -/
+  /-- Server hostname (used for SNI extension and hostname verification). -/
   serverName : String := ""
-  /-- Skip certificate verification (always true for now). -/
-  skipCertVerify : Bool := true
+  /-- Certificate verification mode (default: none for backwards compatibility). -/
+  verifyMode : VerifyMode := .none
+  /-- Trusted root CA certificates for chain verification. -/
+  trustedCerts : Array LeanTLS.X509.X509Certificate := #[]
+  /-- Current time for certificate validity checking (optional). -/
+  currentTime : Option LeanTLS.ASN1.DateTime := .none
 
 -- ============================================================================
 -- Section 3: TLS Connection State
@@ -62,6 +85,12 @@ structure TlsState where
   recvBuffer : ByteArray
   /-- Whether the connection has been closed. -/
   closed : Bool
+  /-- Whether this connection uses AES-256-GCM (true) or AES-128-GCM (false). -/
+  isAES256 : Bool
+  /-- Current client application traffic secret (for KeyUpdate). -/
+  clientAppSecret : ByteArray
+  /-- Current server application traffic secret (for KeyUpdate). -/
+  serverAppSecret : ByteArray
 
 /-- A TLS 1.3 connection handle. All mutable state is behind an IO.Ref. -/
 structure TlsConnection where
@@ -137,12 +166,13 @@ private def sendHandshakeRecord (stream : IOStream) (data : ByteArray) : IO Unit
   }
   writeRecord stream tlsRec
 
-/-- Send an encrypted handshake message. Returns the updated encryption state. -/
+/-- Send an encrypted handshake message using cipher-suite-aware encryption.
+    Returns the updated encryption state. -/
 private def sendEncryptedHandshake
     (stream : IOStream)
     (state : LeanTLS.Record.RecordEncryptionState)
     (data : ByteArray) : IO LeanTLS.Record.RecordEncryptionState := do
-  match LeanTLS.Record.encryptRecord state .handshake data with
+  match LeanTLS.Record.encryptRecordAuto state .handshake data with
   | some (encRec, newState) =>
     writeRecord stream encRec
     return newState
@@ -209,15 +239,16 @@ namespace TlsConnection
     Steps:
     1. Generate ephemeral X25519 keypair
     2. Send ClientHello
-    3. Receive ServerHello
+    3. Receive ServerHello (negotiate cipher suite)
     4. Compute shared secret via X25519
-    5. Derive handshake traffic keys
+    5. Derive handshake traffic keys (cipher-suite-aware)
     6. Receive encrypted handshake messages (EncryptedExtensions, Certificate,
        CertificateVerify, Finished)
-    7. Verify server Finished
-    8. Send client Finished
-    9. Derive application traffic keys
-    10. Return connection ready for application data -/
+    7. Verify certificate chain (if verifyMode != .none)
+    8. Verify server Finished
+    9. Send client Finished
+    10. Derive application traffic keys
+    11. Return connection ready for application data -/
 def connect (stream : IOStream) (hostname : String) (config : TlsConfig := {}) : IO TlsConnection := do
   -- -----------------------------------------------------------------------
   -- Step 1: Generate random bytes for client_random, session_id, and X25519 private key
@@ -265,9 +296,11 @@ def connect (stream : IOStream) (hostname : String) (config : TlsConfig := {}) :
     | some v => pure v
     | none => throwTlsError (.handshakeFailure "failed to parse ServerHello payload")
 
-  -- Validate cipher suite
-  if serverHelloData.cipherSuite != 0x1301 then
-    throwTlsError (.handshakeFailure "server selected unsupported cipher suite")
+  -- Determine cipher suite
+  let selectedSuite ← match LeanTLS.Handshake.CipherSuite.fromUInt16 serverHelloData.cipherSuite with
+    | some cs => pure cs
+    | none => throwTlsError (.handshakeFailure s!"server selected unsupported cipher suite: {serverHelloData.cipherSuite}")
+  let isAES256 := selectedSuite == .aes256gcmSha384
 
   -- Extract server's X25519 public key
   let serverPublicKey ← match serverHelloData.serverPublicKey with
@@ -284,16 +317,33 @@ def connect (stream : IOStream) (hostname : String) (config : TlsConfig := {}) :
   let sharedSecret := LeanTLS.Crypto.X25519.x25519 privateKey serverPublicKey
 
   -- -----------------------------------------------------------------------
-  -- Step 6: Derive handshake secrets and traffic keys
+  -- Step 6: Derive handshake secrets and traffic keys (cipher-suite-aware)
   -- -----------------------------------------------------------------------
-  let transcriptHashCHSH := LeanTLS.Handshake.transcriptHash transcript
+  let transcriptHashCHSH := LeanTLS.Handshake.transcriptHashForSuite selectedSuite transcript
 
-  let eSecret := LeanTLS.KeySchedule.earlySecret
-  let hsSecret := LeanTLS.KeySchedule.handshakeSecret eSecret sharedSecret
-  let chsTraffic := LeanTLS.KeySchedule.clientHandshakeTrafficSecret hsSecret transcriptHashCHSH
-  let shsTraffic := LeanTLS.KeySchedule.serverHandshakeTrafficSecret hsSecret transcriptHashCHSH
-  let serverHsKeys := LeanTLS.KeySchedule.deriveTrafficKeys shsTraffic
-  let clientHsKeys := LeanTLS.KeySchedule.deriveTrafficKeys chsTraffic
+  -- Derive handshake secrets based on cipher suite
+  let (chsTraffic, shsTraffic, hsSecret) :=
+    if isAES256 then
+      let eSecret := LeanTLS.KeySchedule.earlySecretSHA384
+      let hsSecret := LeanTLS.KeySchedule.handshakeSecretSHA384 eSecret sharedSecret
+      let chsTraffic := LeanTLS.KeySchedule.clientHandshakeTrafficSecretSHA384 hsSecret transcriptHashCHSH
+      let shsTraffic := LeanTLS.KeySchedule.serverHandshakeTrafficSecretSHA384 hsSecret transcriptHashCHSH
+      (chsTraffic, shsTraffic, hsSecret)
+    else
+      let eSecret := LeanTLS.KeySchedule.earlySecret
+      let hsSecret := LeanTLS.KeySchedule.handshakeSecret eSecret sharedSecret
+      let chsTraffic := LeanTLS.KeySchedule.clientHandshakeTrafficSecret hsSecret transcriptHashCHSH
+      let shsTraffic := LeanTLS.KeySchedule.serverHandshakeTrafficSecret hsSecret transcriptHashCHSH
+      (chsTraffic, shsTraffic, hsSecret)
+
+  let serverHsKeys := if isAES256 then
+    LeanTLS.KeySchedule.deriveTrafficKeysSHA384 shsTraffic
+  else
+    LeanTLS.KeySchedule.deriveTrafficKeys shsTraffic
+  let clientHsKeys := if isAES256 then
+    LeanTLS.KeySchedule.deriveTrafficKeysSHA384 chsTraffic
+  else
+    LeanTLS.KeySchedule.deriveTrafficKeys chsTraffic
 
   -- -----------------------------------------------------------------------
   -- Step 7: Set up encryption states for handshake
@@ -337,9 +387,9 @@ def connect (stream : IOStream) (hostname : String) (config : TlsConfig := {}) :
     if encRec.contentType != .applicationData then
       throwTlsError (.unexpectedMessage "applicationData" s!"content type {repr encRec.contentType}")
 
-    -- Decrypt the record
+    -- Decrypt the record (cipher-suite-aware)
     let (innerContentType, decryptedContent, newDecState) ←
-      match LeanTLS.Record.decryptRecord serverDecState encRec with
+      match LeanTLS.Record.decryptRecordAuto serverDecState encRec with
       | some v => pure v
       | none => throwTlsError (.decryptionFailed "failed to decrypt server handshake record")
     serverDecState := newDecState
@@ -394,13 +444,13 @@ def connect (stream : IOStream) (hostname : String) (config : TlsConfig := {}) :
   if finType != .finished then
     throwTlsError (.unexpectedMessage "Finished" s!"{repr finType}")
 
-  -- Certificate verification (if enabled)
-  if !config.skipCertVerify then
+  -- Certificate verification (CertVerify signature check via existing CertVerify module)
+  if config.verifyMode != .none then
     -- The transcript for CertificateVerify verification includes:
     -- ClientHello, ServerHello, EncryptedExtensions, Certificate
     -- (but NOT CertificateVerify itself)
     let transcriptForCV := transcript.push eeRaw |>.push certRaw
-    let transcriptHashForCV := LeanTLS.Handshake.transcriptHash transcriptForCV
+    let transcriptHashForCV := LeanTLS.Handshake.transcriptHashForSuite selectedSuite transcriptForCV
 
     -- Extract the Certificate and CertificateVerify payloads
     let certPayload ← match LeanTLS.Handshake.HandshakeMessage.decode certRaw with
@@ -410,10 +460,20 @@ def connect (stream : IOStream) (hostname : String) (config : TlsConfig := {}) :
       | some (msg, _) => pure msg.payload
       | none => throwTlsError (.certificateError "failed to decode CertificateVerify message")
 
-    -- Verify certificate and signature
+    -- Verify CertificateVerify signature (existing single-cert verification)
     match LeanTLS.CertVerify.verifyCertificate certPayload cvPayload transcriptHashForCV hostname with
     | .ok () => pure ()
     | .error e => throwTlsError e
+
+    -- Certificate chain verification via ChainVerify (if trusted certs are provided)
+    if config.trustedCerts.size > 0 then
+      match LeanTLS.CertVerify.parseCertificateMessage certPayload with
+      | some certMsg =>
+        match LeanTLS.ChainVerify.verifyCertificateChain certMsg.certificates config.trustedCerts config.currentTime with
+        | .ok () => pure ()
+        | .error e => throwTlsError e
+      | none =>
+        throwTlsError (.certificateError "failed to parse Certificate message for chain verification")
 
   -- Add EncryptedExtensions, Certificate, CertificateVerify to transcript
   -- (Finished is NOT included when computing the hash to verify it)
@@ -421,18 +481,19 @@ def connect (stream : IOStream) (hostname : String) (config : TlsConfig := {}) :
   transcript := transcript.push certRaw
   transcript := transcript.push cvRaw
 
-  -- Verify server Finished
-  -- The verify_data is computed over the transcript hash of everything
-  -- up to (but not including) the Finished message itself
-  let transcriptHashPreFinished := LeanTLS.Handshake.transcriptHash transcript
-  let serverFinKey := LeanTLS.KeySchedule.finishedKey shsTraffic
+  -- Verify server Finished (cipher-suite-aware)
+  let transcriptHashPreFinished := LeanTLS.Handshake.transcriptHashForSuite selectedSuite transcript
+  let serverFinKey := if isAES256 then
+    LeanTLS.KeySchedule.finishedKeySHA384 shsTraffic
+  else
+    LeanTLS.KeySchedule.finishedKey shsTraffic
 
   -- Extract the verify_data from the Finished message payload
   let serverFinVerifyData ← match LeanTLS.Handshake.HandshakeMessage.decode finRaw with
     | some (finMsg, _) => pure finMsg.payload
     | none => throwTlsError (.handshakeFailure "failed to decode server Finished message")
 
-  if !(LeanTLS.Handshake.verifyFinished serverFinKey transcriptHashPreFinished serverFinVerifyData) then
+  if !(LeanTLS.Handshake.verifyFinishedForSuite selectedSuite serverFinKey transcriptHashPreFinished serverFinVerifyData) then
     throwTlsError (.handshakeFailure "server Finished verification failed")
 
   -- Add server Finished to transcript
@@ -441,9 +502,12 @@ def connect (stream : IOStream) (hostname : String) (config : TlsConfig := {}) :
   -- -----------------------------------------------------------------------
   -- Step 10: Compute and send client Finished
   -- -----------------------------------------------------------------------
-  let transcriptHashWithServerFin := LeanTLS.Handshake.transcriptHash transcript
-  let clientFinKey := LeanTLS.KeySchedule.finishedKey chsTraffic
-  let clientFinVerifyData := LeanTLS.Handshake.buildFinishedVerifyData clientFinKey transcriptHashWithServerFin
+  let transcriptHashWithServerFin := LeanTLS.Handshake.transcriptHashForSuite selectedSuite transcript
+  let clientFinKey := if isAES256 then
+    LeanTLS.KeySchedule.finishedKeySHA384 chsTraffic
+  else
+    LeanTLS.KeySchedule.finishedKey chsTraffic
+  let clientFinVerifyData := LeanTLS.Handshake.buildFinishedVerifyDataForSuite selectedSuite clientFinKey transcriptHashWithServerFin
   let clientFinMsg := LeanTLS.Handshake.HandshakeMessage.encode {
     msgType := .finished
     payload := clientFinVerifyData
@@ -460,11 +524,26 @@ def connect (stream : IOStream) (hostname : String) (config : TlsConfig := {}) :
   -- in the hash for deriving app traffic secrets per RFC 8446 Section 7.1)
   let appTranscriptHash := transcriptHashWithServerFin
 
-  let mSecret := LeanTLS.KeySchedule.masterSecret hsSecret
-  let catSecret := LeanTLS.KeySchedule.clientAppTrafficSecret mSecret appTranscriptHash
-  let satSecret := LeanTLS.KeySchedule.serverAppTrafficSecret mSecret appTranscriptHash
-  let clientAppKeys := LeanTLS.KeySchedule.deriveTrafficKeys catSecret
-  let serverAppKeys := LeanTLS.KeySchedule.deriveTrafficKeys satSecret
+  let mSecret := if isAES256 then
+    LeanTLS.KeySchedule.masterSecretSHA384 hsSecret
+  else
+    LeanTLS.KeySchedule.masterSecret hsSecret
+  let catSecret := if isAES256 then
+    LeanTLS.KeySchedule.clientAppTrafficSecretSHA384 mSecret appTranscriptHash
+  else
+    LeanTLS.KeySchedule.clientAppTrafficSecret mSecret appTranscriptHash
+  let satSecret := if isAES256 then
+    LeanTLS.KeySchedule.serverAppTrafficSecretSHA384 mSecret appTranscriptHash
+  else
+    LeanTLS.KeySchedule.serverAppTrafficSecret mSecret appTranscriptHash
+  let clientAppKeys := if isAES256 then
+    LeanTLS.KeySchedule.deriveTrafficKeysSHA384 catSecret
+  else
+    LeanTLS.KeySchedule.deriveTrafficKeys catSecret
+  let serverAppKeys := if isAES256 then
+    LeanTLS.KeySchedule.deriveTrafficKeysSHA384 satSecret
+  else
+    LeanTLS.KeySchedule.deriveTrafficKeys satSecret
 
   -- -----------------------------------------------------------------------
   -- Step 12: Set up application encryption states and return TlsConnection
@@ -487,6 +566,9 @@ def connect (stream : IOStream) (hostname : String) (config : TlsConfig := {}) :
     serverDecState := appServerDecState
     recvBuffer := ByteArray.empty
     closed := false
+    isAES256 := isAES256
+    clientAppSecret := catSecret
+    serverAppSecret := satSecret
   }
 
   let ref ← IO.mkRef state
@@ -501,7 +583,7 @@ def send (conn : TlsConnection) (data : ByteArray) : IO Unit := do
   let st ← conn.ref.get
   if st.closed then
     throwTlsError .connectionClosed
-  match LeanTLS.Record.encryptRecord st.clientEncState .applicationData data with
+  match LeanTLS.Record.encryptRecordAuto st.clientEncState .applicationData data with
   | some (encRec, newEncState) =>
     writeRecord st.stream encRec
     conn.ref.modify fun s => { s with clientEncState := newEncState }
@@ -528,7 +610,7 @@ private def recvOneRecord (conn : TlsConnection) : IO (LeanTLS.Record.ContentTyp
     if encRec.contentType != .applicationData then
       throwTlsError (.unexpectedMessage "applicationData" s!"content type {repr encRec.contentType}")
 
-    match LeanTLS.Record.decryptRecord st.serverDecState encRec with
+    match LeanTLS.Record.decryptRecordAuto st.serverDecState encRec with
     | some (innerCt, content, newDecState) =>
       conn.ref.modify fun s => { s with serverDecState := newDecState }
       resultCt := innerCt
@@ -538,10 +620,57 @@ private def recvOneRecord (conn : TlsConnection) : IO (LeanTLS.Record.ContentTyp
       throwTlsError (.decryptionFailed "failed to decrypt application data record")
   return (resultCt, resultContent)
 
+/-- Handle a KeyUpdate post-handshake message. Updates the server's decryption
+    keys and optionally sends a KeyUpdate response to update our own keys. -/
+private def handleKeyUpdate (conn : TlsConnection) (payload : ByteArray) : IO Unit := do
+  let request ← match LeanTLS.KeyUpdate.parseKeyUpdate payload with
+    | some r => pure r
+    | none => throwTlsError (.protocolError "failed to parse KeyUpdate message")
+  let st ← conn.ref.get
+  -- Update server application traffic secret and derive new keys
+  let newServerSecret := if st.isAES256 then
+    LeanTLS.KeyUpdate.updateTrafficSecretSHA384 st.serverAppSecret
+  else
+    LeanTLS.KeyUpdate.updateTrafficSecret st.serverAppSecret
+  let newServerKeys := LeanTLS.KeyUpdate.deriveUpdatedTrafficKeys newServerSecret st.isAES256
+  let newServerDecState : LeanTLS.Record.RecordEncryptionState := {
+    key := newServerKeys.key
+    iv := newServerKeys.iv
+    seqNum := 0
+  }
+  conn.ref.modify fun s => { s with
+    serverDecState := newServerDecState
+    serverAppSecret := newServerSecret
+  }
+  -- If update_requested, send a KeyUpdate response and update our client keys
+  if request == .updateRequested then
+    let st2 ← conn.ref.get
+    let responseMsg := LeanTLS.KeyUpdate.buildKeyUpdateMessage .updateNotRequested
+    match LeanTLS.Record.encryptRecordAuto st2.clientEncState .handshake responseMsg with
+    | some (encRec, _newEncState) =>
+      writeRecord st2.stream encRec
+      -- Update client application traffic secret and derive new keys
+      let newClientSecret := if st2.isAES256 then
+        LeanTLS.KeyUpdate.updateTrafficSecretSHA384 st2.clientAppSecret
+      else
+        LeanTLS.KeyUpdate.updateTrafficSecret st2.clientAppSecret
+      let newClientKeys := LeanTLS.KeyUpdate.deriveUpdatedTrafficKeys newClientSecret st2.isAES256
+      let newClientEncState : LeanTLS.Record.RecordEncryptionState := {
+        key := newClientKeys.key
+        iv := newClientKeys.iv
+        seqNum := 0
+      }
+      conn.ref.modify fun s => { s with
+        clientEncState := newClientEncState
+        clientAppSecret := newClientSecret
+      }
+    | none => throwTlsError (.internalError "sequence number overflow during KeyUpdate response")
+
 /-- Receive application data from the TLS connection.
     Returns `none` if the connection has been closed (e.g., via close_notify).
     If there is buffered data from a previous record, returns that first.
-    Otherwise reads and decrypts the next record from the stream. -/
+    Otherwise reads and decrypts the next record from the stream.
+    Handles KeyUpdate post-handshake messages transparently. -/
 def recv (conn : TlsConnection) (maxBytes : Nat := 16384) : IO (Option ByteArray) := do
   let st ← conn.ref.get
   if st.closed then
@@ -598,7 +727,17 @@ def recv (conn : TlsConnection) (maxBytes : Nat := 16384) : IO (Option ByteArray
         else
           throwTlsError (.protocolError "malformed alert (too short)")
     | .handshake =>
-      -- Post-handshake messages (e.g., NewSessionTicket) -- skip them
+      -- Handle post-handshake messages
+      match LeanTLS.Handshake.HandshakeMessage.decode content with
+      | some (hsMsg, _) =>
+        if hsMsg.msgType.toByte == LeanTLS.KeyUpdate.keyUpdateHandshakeType then
+          handleKeyUpdate conn hsMsg.payload
+        else
+          -- Other post-handshake messages (e.g., NewSessionTicket) -- skip them
+          pure ()
+      | none =>
+        -- Could not decode handshake message, skip it
+        pure ()
       continue
     | .changeCipherSpec =>
       continue
@@ -614,7 +753,7 @@ def shutdown (conn : TlsConnection) : IO Unit := do
   if st.closed then
     return ()
   let alertData := LeanTLS.encodeAlert .warning .closeNotify
-  match LeanTLS.Record.encryptRecord st.clientEncState .alert alertData with
+  match LeanTLS.Record.encryptRecordAuto st.clientEncState .alert alertData with
   | some (encRec, newEncState) =>
     writeRecord st.stream encRec
     conn.ref.modify fun s => { s with clientEncState := newEncState, closed := true }
