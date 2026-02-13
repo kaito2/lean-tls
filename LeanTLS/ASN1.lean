@@ -391,12 +391,12 @@ def runTests : IO Bool := do
       IO.println "    FAILED (did not consume all bytes)"
       allPassed := false
     else
-      let tag := node.getTag
+      let tag := ASN1Node.getTag node
       if tag.tagClass != TagClass.universal || tag.tagNumber != 6 then
         IO.println s!"    FAILED (wrong tag: class={repr tag.tagClass} number={tag.tagNumber})"
         allPassed := false
       else
-        let val := node.getValue
+        let val := ASN1Node.getValue node
         match parseOID val with
         | some components =>
           if oidEq components oidRsaEncryption then
@@ -422,23 +422,23 @@ def runTests : IO Bool := do
   let seqDer := LeanTLS.Utils.hexToBytes "3007020101020200FF"
   match parseAll seqDer with
   | some node =>
-    let children := node.getChildren
+    let children := ASN1Node.getChildren node
     if children.size != 2 then
       IO.println s!"    FAILED (expected 2 children, got {children.size})"
       allPassed := false
     else
-      let child0 := children.get! 0
-      let child1 := children.get! 1
-      let tag0 := child0.getTag
-      let tag1 := child1.getTag
+      let child0 := children[0]!
+      let child1 := children[1]!
+      let tag0 := ASN1Node.getTag child0
+      let tag1 := ASN1Node.getTag child1
       let bothInt := tag0.tagNumber == 2 && tag1.tagNumber == 2
           && tag0.tagClass == TagClass.universal && tag1.tagClass == TagClass.universal
       if !bothInt then
         IO.println "    FAILED (children are not both INTEGER)"
         allPassed := false
       else
-        let val0 := parseInteger child0.getValue
-        let val1 := parseInteger child1.getValue
+        let val0 := parseInteger (ASN1Node.getValue child0)
+        let val1 := parseInteger (ASN1Node.getValue child1)
         if val0 == 1 && val1 == 255 then
           IO.println "    PASSED"
         else
@@ -460,32 +460,32 @@ def runTests : IO Bool := do
   let nestedDer := LeanTLS.Utils.hexToBytes "3007300302012A0500"
   match parseAll nestedDer with
   | some node =>
-    let outerTag := node.getTag
+    let outerTag := ASN1Node.getTag node
     -- SEQUENCE = universal constructed, tag number 0x10 = 16
     if outerTag.tagNumber != 0x10 || outerTag.encoding != Encoding.constructed then
       IO.println s!"    FAILED (outer not SEQUENCE: number={outerTag.tagNumber})"
       allPassed := false
     else
-      let children := node.getChildren
+      let children := ASN1Node.getChildren node
       if children.size != 2 then
         IO.println s!"    FAILED (expected 2 children, got {children.size})"
         allPassed := false
       else
-        let child0 := children.get! 0
-        let child0Tag := child0.getTag
+        let child0 := children[0]!
+        let child0Tag := ASN1Node.getTag child0
         if child0Tag.tagNumber != 0x10 || child0Tag.encoding != Encoding.constructed then
           IO.println "    FAILED (first child not constructed SEQUENCE)"
           allPassed := false
         else
-          let grandChildren := child0.getChildren
+          let grandChildren := ASN1Node.getChildren child0
           if grandChildren.size != 1 then
             IO.println s!"    FAILED (expected 1 grandchild, got {grandChildren.size})"
             allPassed := false
           else
-            let gc0 := grandChildren.get! 0
-            let intVal := parseInteger gc0.getValue
-            let child1 := children.get! 1
-            let child1Tag := child1.getTag
+            let gc0 := grandChildren[0]!
+            let intVal := parseInteger (ASN1Node.getValue gc0)
+            let child1 := children[1]!
+            let child1Tag := ASN1Node.getTag child1
             let nullOk := child1Tag.tagNumber == 5
                 && child1Tag.tagClass == TagClass.universal
             if intVal == 42 && nullOk then
@@ -508,7 +508,7 @@ def runTests : IO Bool := do
   let ctxDer := LeanTLS.Utils.hexToBytes "A003020103"
   match parseAll ctxDer with
   | some node =>
-    let tag := node.getTag
+    let tag := ASN1Node.getTag node
     if tag.tagClass != TagClass.contextSpecific then
       IO.println s!"    FAILED (expected contextSpecific, got {repr tag.tagClass})"
       allPassed := false
@@ -519,14 +519,14 @@ def runTests : IO Bool := do
       IO.println "    FAILED (expected constructed encoding)"
       allPassed := false
     else
-      let children := node.getChildren
+      let children := ASN1Node.getChildren node
       if children.size != 1 then
         IO.println s!"    FAILED (expected 1 child, got {children.size})"
         allPassed := false
       else
-        let child0 := children.get! 0
-        let childTag := child0.getTag
-        let childVal := parseInteger child0.getValue
+        let child0 := children[0]!
+        let childTag := ASN1Node.getTag child0
+        let childVal := parseInteger (ASN1Node.getValue child0)
         if childTag.tagNumber == 2 && childVal == 3 then
           IO.println "    PASSED"
         else

@@ -98,18 +98,18 @@ def parseRSAPublicKey (bitStringContent : ByteArray) : Option RSAPublicKey := do
       -- Parse the remaining bytes as a SEQUENCE of two INTEGERs
       let inner := bitStringContent.extract 1 bitStringContent.size
       let seqNode ← ASN1.parseAll inner
-      let children := seqNode.getChildren
+      let children := ASN1.ASN1Node.getChildren seqNode
       if children.size < 2 then none
       else
-        let modNode := children.get! 0
-        let expNode := children.get! 1
+        let modNode := children[0]!
+        let expNode := children[1]!
         -- Both should be INTEGERs (universal, tag number 2)
-        let modTag := modNode.getTag
-        let expTag := expNode.getTag
-        if modTag.tagNumber != 2 || expTag.tagNumber != 2 then none
+        let modTag := ASN1.ASN1Node.getTag modNode
+        let expTag := ASN1.ASN1Node.getTag expNode
+        if ASN1.Tag.tagNumber modTag != 2 || ASN1.Tag.tagNumber expTag != 2 then none
         else
-          let modulus := ASN1.parseInteger modNode.getValue
-          let exponent := ASN1.parseInteger expNode.getValue
+          let modulus := ASN1.parseInteger (ASN1.ASN1Node.getValue modNode)
+          let exponent := ASN1.parseInteger (ASN1.ASN1Node.getValue expNode)
           some { modulus := modulus, exponent := exponent }
 
 -- ============================================================================
@@ -125,32 +125,32 @@ def parseRSAPublicKey (bitStringContent : ByteArray) : Option RSAPublicKey := do
     For EC:  OID 1.2.840.10045.2.1 (id-ecPublicKey), params = namedCurve OID, BIT STRING contains EC point
 -/
 def parseSubjectPublicKeyInfo (node : ASN1.ASN1Node) : Option PublicKey := do
-  let children := node.getChildren
+  let children := ASN1.ASN1Node.getChildren node
   if children.size < 2 then none
   else
     -- First child: AlgorithmIdentifier SEQUENCE
-    let algId := children.get! 0
-    let algChildren := algId.getChildren
+    let algId := children[0]!
+    let algChildren := ASN1.ASN1Node.getChildren algId
     if algChildren.size < 1 then none
     else
       -- Extract the OID
-      let oidNode := algChildren.get! 0
-      let oidTag := oidNode.getTag
-      if oidTag.tagNumber != 6 || oidTag.tagClass != .universal then none
+      let oidNode := algChildren[0]!
+      let oidTag := ASN1.ASN1Node.getTag oidNode
+      if ASN1.Tag.tagNumber oidTag != 6 || ASN1.Tag.tagClass oidTag != .universal then none
       else
-        let oid ← ASN1.parseOID oidNode.getValue
+        let oid ← ASN1.parseOID (ASN1.ASN1Node.getValue oidNode)
         -- Second child: BIT STRING containing the public key
-        let pubKeyBitString := children.get! 1
-        let bsTag := pubKeyBitString.getTag
-        if bsTag.tagNumber != 3 || bsTag.tagClass != .universal then none
+        let pubKeyBitString := children[1]!
+        let bsTag := ASN1.ASN1Node.getTag pubKeyBitString
+        if ASN1.Tag.tagNumber bsTag != 3 || ASN1.Tag.tagClass bsTag != .universal then none
         else
           if ASN1.oidEq oid ASN1.oidRsaEncryption then
             -- RSA public key
-            let rsaKey ← parseRSAPublicKey pubKeyBitString.getValue
+            let rsaKey ← parseRSAPublicKey (ASN1.ASN1Node.getValue pubKeyBitString)
             some (.rsa rsaKey)
           else if ASN1.oidEq oid ASN1.oidEcPublicKey then
             -- EC public key: BIT STRING value = unused-bits byte (0x00) + EC point
-            let bsValue := pubKeyBitString.getValue
+            let bsValue := ASN1.ASN1Node.getValue pubKeyBitString
             if bsValue.size < 2 then none
             else
               if bsValue.get! 0 != 0x00 then none
@@ -170,31 +170,31 @@ def parseSubjectPublicKeyInfo (node : ASN1.ASN1Node) : Option PublicKey := do
     ATAV ::= SEQUENCE { type OID, value ANY }
 -/
 def parseSubjectCN (subjectNode : ASN1.ASN1Node) : Option String :=
-  let rdnSeq := subjectNode.getChildren
+  let rdnSeq := ASN1.ASN1Node.getChildren subjectNode
   -- Walk each RDN (SET)
   let rec goRDN (i : Nat) : Option String :=
     if i >= rdnSeq.size then none
     else
-      let rdn := rdnSeq.get! i
-      let atvs := rdn.getChildren
+      let rdn := rdnSeq[i]!
+      let atvs := ASN1.ASN1Node.getChildren rdn
       -- Walk each ATV (SEQUENCE) in the SET
       let rec goATV (j : Nat) : Option String :=
         if j >= atvs.size then none
         else
-          let atv := atvs.get! j
-          let atvChildren := atv.getChildren
+          let atv := atvs[j]!
+          let atvChildren := ASN1.ASN1Node.getChildren atv
           if atvChildren.size < 2 then goATV (j + 1)
           else
-            let oidNode := atvChildren.get! 0
-            let oidTag := oidNode.getTag
-            if oidTag.tagNumber != 6 || oidTag.tagClass != .universal then goATV (j + 1)
+            let oidNode := atvChildren[0]!
+            let oidTag := ASN1.ASN1Node.getTag oidNode
+            if ASN1.Tag.tagNumber oidTag != 6 || ASN1.Tag.tagClass oidTag != .universal then goATV (j + 1)
             else
-              match ASN1.parseOID oidNode.getValue with
+              match ASN1.parseOID (ASN1.ASN1Node.getValue oidNode) with
               | none => goATV (j + 1)
               | some oid =>
                 if ASN1.oidEq oid ASN1.oidCommonName then
-                  let valNode := atvChildren.get! 1
-                  some (bytesToString valNode.getValue)
+                  let valNode := atvChildren[1]!
+                  some (bytesToString (ASN1.ASN1Node.getValue valNode))
                 else goATV (j + 1)
       termination_by atvs.size - j
       match goATV 0 with
@@ -216,46 +216,46 @@ def parseSubjectCN (subjectNode : ASN1.ASN1Node) : Option String :=
     dNSName is context-specific tag 2, primitive (tag byte 0x82).
 -/
 def parseSAN (extensionsNode : ASN1.ASN1Node) : Array String :=
-  let exts := extensionsNode.getChildren
+  let exts := ASN1.ASN1Node.getChildren extensionsNode
   let rec goExt (i : Nat) (acc : Array String) : Array String :=
     if i >= exts.size then acc
     else
-      let ext := exts.get! i
-      let extChildren := ext.getChildren
+      let ext := exts[i]!
+      let extChildren := ASN1.ASN1Node.getChildren ext
       -- Extension must have at least 2 children (OID + OCTET STRING),
       -- optionally 3 if critical BOOLEAN is present
       if extChildren.size < 2 then goExt (i + 1) acc
       else
-        let oidNode := extChildren.get! 0
-        let oidTag := oidNode.getTag
-        if oidTag.tagNumber != 6 || oidTag.tagClass != .universal then goExt (i + 1) acc
+        let oidNode := extChildren[0]!
+        let oidTag := ASN1.ASN1Node.getTag oidNode
+        if ASN1.Tag.tagNumber oidTag != 6 || ASN1.Tag.tagClass oidTag != .universal then goExt (i + 1) acc
         else
-          match ASN1.parseOID oidNode.getValue with
+          match ASN1.parseOID (ASN1.ASN1Node.getValue oidNode) with
           | none => goExt (i + 1) acc
           | some oid =>
             if !ASN1.oidEq oid ASN1.oidSubjectAltName then goExt (i + 1) acc
             else
               -- The OCTET STRING is the last child (may be index 1 or 2 depending on critical flag)
               let octetIdx := extChildren.size - 1
-              let octetNode := extChildren.get! octetIdx
-              let octetTag := octetNode.getTag
+              let octetNode := extChildren[octetIdx]!
+              let octetTag := ASN1.ASN1Node.getTag octetNode
               -- Should be OCTET STRING (tag 4, universal)
-              if octetTag.tagNumber != 4 || octetTag.tagClass != .universal then goExt (i + 1) acc
+              if ASN1.Tag.tagNumber octetTag != 4 || ASN1.Tag.tagClass octetTag != .universal then goExt (i + 1) acc
               else
                 -- Parse the OCTET STRING content as GeneralNames SEQUENCE
-                let octetValue := octetNode.getValue
+                let octetValue := ASN1.ASN1Node.getValue octetNode
                 match ASN1.parseAll octetValue with
                 | none => goExt (i + 1) acc
                 | some generalNamesSeq =>
-                  let names := generalNamesSeq.getChildren
+                  let names := ASN1.ASN1Node.getChildren generalNamesSeq
                   let rec goDNS (j : Nat) (dnsAcc : Array String) : Array String :=
                     if j >= names.size then dnsAcc
                     else
-                      let name := names.get! j
-                      let nameTag := name.getTag
+                      let name := names[j]!
+                      let nameTag := ASN1.ASN1Node.getTag name
                       -- dNSName: context-specific, tag number 2, primitive
-                      if nameTag.tagClass == .contextSpecific && nameTag.tagNumber == 2 then
-                        let dnsName := bytesToString name.getValue
+                      if ASN1.Tag.tagClass nameTag == .contextSpecific && ASN1.Tag.tagNumber nameTag == 2 then
+                        let dnsName := bytesToString (ASN1.ASN1Node.getValue name)
                         goDNS (j + 1) (dnsAcc.push dnsName)
                       else
                         goDNS (j + 1) dnsAcc
@@ -270,27 +270,27 @@ def parseSAN (extensionsNode : ASN1.ASN1Node) : Array String :=
 
 /-- Parse a single ASN.1 time node (UTCTime tag 0x17 or GeneralizedTime tag 0x18). -/
 private def parseTimeNode (node : ASN1.ASN1Node) : Option ASN1.DateTime :=
-  let tag := node.getTag
-  if tag.tagClass != .universal then none
-  else if tag.tagNumber == 0x17 then
-    ASN1.parseUTCTime node.getValue
-  else if tag.tagNumber == 0x18 then
-    ASN1.parseGeneralizedTime node.getValue
+  let tag := ASN1.ASN1Node.getTag node
+  if ASN1.Tag.tagClass tag != .universal then none
+  else if ASN1.Tag.tagNumber tag == 0x17 then
+    ASN1.parseUTCTime (ASN1.ASN1Node.getValue node)
+  else if ASN1.Tag.tagNumber tag == 0x18 then
+    ASN1.parseGeneralizedTime (ASN1.ASN1Node.getValue node)
   else none
 
 /-- Parse the Validity SEQUENCE (notBefore, notAfter) from a TBS certificate ASN1 node. -/
 def parseValidity (tbsNode : LeanTLS.ASN1.ASN1Node) (hasVersion : Bool) : Option (LeanTLS.ASN1.DateTime × LeanTLS.ASN1.DateTime) := do
-  let tbsChildren := tbsNode.getChildren
+  let tbsChildren := ASN1.ASN1Node.getChildren tbsNode
   let offset := if hasVersion then 1 else 0
   let validityIdx := offset + 3
   if tbsChildren.size <= validityIdx then none
   else
-    let validityNode := tbsChildren.get! validityIdx
-    let validityChildren := validityNode.getChildren
+    let validityNode := tbsChildren[validityIdx]!
+    let validityChildren := ASN1.ASN1Node.getChildren validityNode
     if validityChildren.size < 2 then none
     else
-      let notBefore ← parseTimeNode (validityChildren.get! 0)
-      let notAfter ← parseTimeNode (validityChildren.get! 1)
+      let notBefore ← parseTimeNode (validityChildren[0]!)
+      let notAfter ← parseTimeNode (validityChildren[1]!)
       some (notBefore, notAfter)
 
 /-- Check if a certificate is valid at the given time. -/
@@ -347,7 +347,7 @@ private def extractChildDER (seqDER : ByteArray) (idx : Nat) : Option ByteArray 
 def parseX509 (der : ByteArray) : Option X509Certificate := do
   -- Parse the outer Certificate SEQUENCE to validate structure
   let (outerNode, _) ← ASN1.parseTLV der 0
-  let outerChildren := outerNode.getChildren
+  let outerChildren := ASN1.ASN1Node.getChildren outerNode
   if outerChildren.size < 3 then none
   else
     -- Determine where the outer SEQUENCE value region starts
@@ -357,38 +357,38 @@ def parseX509 (der : ByteArray) : Option X509Certificate := do
     let tbsCertificateDER := der.extract outerValueStart tbsEnd
 
     -- Extract TBSCertificate from the parsed tree
-    let tbsNode := outerChildren.get! 0
+    let tbsNode := outerChildren[0]!
 
     -- Extract signature algorithm OID from the second child
-    let sigAlgNode := outerChildren.get! 1
-    let sigAlgChildren := sigAlgNode.getChildren
+    let sigAlgNode := outerChildren[1]!
+    let sigAlgChildren := ASN1.ASN1Node.getChildren sigAlgNode
     if sigAlgChildren.size < 1 then none
     else
-      let sigAlgOidNode := sigAlgChildren.get! 0
-      let sigAlgOidTag := sigAlgOidNode.getTag
-      if sigAlgOidTag.tagNumber != 6 || sigAlgOidTag.tagClass != .universal then none
+      let sigAlgOidNode := sigAlgChildren[0]!
+      let sigAlgOidTag := ASN1.ASN1Node.getTag sigAlgOidNode
+      if ASN1.Tag.tagNumber sigAlgOidTag != 6 || ASN1.Tag.tagClass sigAlgOidTag != .universal then none
       else
-        let signatureAlgorithm ← ASN1.parseOID sigAlgOidNode.getValue
+        let signatureAlgorithm ← ASN1.parseOID (ASN1.ASN1Node.getValue sigAlgOidNode)
 
         -- Extract signature value from the third child (BIT STRING)
-        let sigValNode := outerChildren.get! 2
-        let sigValTag := sigValNode.getTag
-        if sigValTag.tagNumber != 3 || sigValTag.tagClass != .universal then none
+        let sigValNode := outerChildren[2]!
+        let sigValTag := ASN1.ASN1Node.getTag sigValNode
+        if ASN1.Tag.tagNumber sigValTag != 3 || ASN1.Tag.tagClass sigValTag != .universal then none
         else
-          let sigRaw := sigValNode.getValue
+          let sigRaw := ASN1.ASN1Node.getValue sigValNode
           -- Skip the unused-bits byte (first byte, should be 0x00)
           if sigRaw.size < 1 then none
           else
             let signatureValue := sigRaw.extract 1 sigRaw.size
 
             -- Parse TBSCertificate fields
-            let tbsChildren := tbsNode.getChildren
+            let tbsChildren := ASN1.ASN1Node.getChildren tbsNode
             if tbsChildren.size < 6 then none
             else
               -- Detect version tag: if first child is context-specific tag 0,
               -- it is the explicit version wrapper (v3 certificates)
-              let firstTag := (tbsChildren.get! 0).getTag
-              let hasVersion := firstTag.tagClass == .contextSpecific && firstTag.tagNumber == 0
+              let firstTag := ASN1.ASN1Node.getTag (tbsChildren[0]!)
+              let hasVersion := ASN1.Tag.tagClass firstTag == .contextSpecific && ASN1.Tag.tagNumber firstTag == 0
               let offset := if hasVersion then 1 else 0
 
               -- Field indices (with offset applied):
@@ -405,8 +405,8 @@ def parseX509 (der : ByteArray) : Option X509Certificate := do
 
               if tbsChildren.size <= spkiIdx then none
               else
-                let subjectNode := tbsChildren.get! subjectIdx
-                let spkiNode := tbsChildren.get! spkiIdx
+                let subjectNode := tbsChildren[subjectIdx]!
+                let spkiNode := tbsChildren[spkiIdx]!
 
                 -- Extract CN from subject
                 let commonName := parseSubjectCN subjectNode
@@ -417,13 +417,13 @@ def parseX509 (der : ByteArray) : Option X509Certificate := do
                 -- Extract SAN from extensions (if present)
                 let subjectAltNames :=
                   if extIdx < tbsChildren.size then
-                    let extWrapper := tbsChildren.get! extIdx
-                    let extWrapperTag := extWrapper.getTag
+                    let extWrapper := tbsChildren[extIdx]!
+                    let extWrapperTag := ASN1.ASN1Node.getTag extWrapper
                     -- Extensions are wrapped in context-specific tag [3] constructed
-                    if extWrapperTag.tagClass == .contextSpecific && extWrapperTag.tagNumber == 3 then
-                      let extWrapperChildren := extWrapper.getChildren
+                    if ASN1.Tag.tagClass extWrapperTag == .contextSpecific && ASN1.Tag.tagNumber extWrapperTag == 3 then
+                      let extWrapperChildren := ASN1.ASN1Node.getChildren extWrapper
                       if extWrapperChildren.size >= 1 then
-                        parseSAN (extWrapperChildren.get! 0)
+                        parseSAN (extWrapperChildren[0]!)
                       else #[]
                     else #[]
                   else #[]

@@ -53,13 +53,13 @@ def base64Decode (input : String) : Option ByteArray :=
     if remainder == 1 then none
     else
       let result := Id.run do
-        let mut buf := ByteArray.mkEmpty (fullGroups * 3 + if remainder > 0 then remainder - 1 else 0)
+        let mut buf := ByteArray.emptyWithCapacity (fullGroups * 3 + if remainder > 0 then remainder - 1 else 0)
         -- Process full 4-value groups
         for i in [:fullGroups] do
-          let a := valsArr.get! (i * 4)
-          let b := valsArr.get! (i * 4 + 1)
-          let c := valsArr.get! (i * 4 + 2)
-          let d := valsArr.get! (i * 4 + 3)
+          let a := valsArr[i * 4]!
+          let b := valsArr[i * 4 + 1]!
+          let c := valsArr[i * 4 + 2]!
+          let d := valsArr[i * 4 + 3]!
           -- Combine 4 x 6-bit values into 3 bytes
           buf := buf.push ((a <<< 2) ||| (b >>> 4))
           buf := buf.push ((b <<< 4) ||| (c >>> 2))
@@ -67,14 +67,14 @@ def base64Decode (input : String) : Option ByteArray :=
         -- Handle remaining values
         if remainder == 2 then
           -- 2 values = 1 output byte
-          let a := valsArr.get! (fullGroups * 4)
-          let b := valsArr.get! (fullGroups * 4 + 1)
+          let a := valsArr[fullGroups * 4]!
+          let b := valsArr[fullGroups * 4 + 1]!
           buf := buf.push ((a <<< 2) ||| (b >>> 4))
         else if remainder == 3 then
           -- 3 values = 2 output bytes
-          let a := valsArr.get! (fullGroups * 4)
-          let b := valsArr.get! (fullGroups * 4 + 1)
-          let c := valsArr.get! (fullGroups * 4 + 2)
+          let a := valsArr[fullGroups * 4]!
+          let b := valsArr[fullGroups * 4 + 1]!
+          let c := valsArr[fullGroups * 4 + 2]!
           buf := buf.push ((a <<< 2) ||| (b >>> 4))
           buf := buf.push ((b <<< 4) ||| (c >>> 2))
         return buf
@@ -94,35 +94,28 @@ instance : Inhabited PEMBlock where
 
 /-- Check if a string starts with the given target prefix. -/
 private def hasPrefix (s : String) (pfx : String) : Bool :=
-  let sLen := s.length
-  let pLen := pfx.length
-  if sLen < pLen then false
-  else (s.take pLen) == pfx
+  s.startsWith pfx
 
 /-- Extract a PEM label from a BEGIN line.
     Expects format: "-----BEGIN <label>-----"
     Returns the label string (e.g., "CERTIFICATE"). -/
 private def extractBeginLabel (line : String) : Option String :=
-  let trimmed := line.trim
+  let trimmed := line.trimAscii.toString
   let beginPfx := "-----BEGIN "
   let endSuffix := "-----"
   if hasPrefix trimmed beginPfx then
     let afterPfx := trimmed.drop beginPfx.length
     -- Check that it ends with "-----"
-    let afterPfxLen := afterPfx.length
-    if afterPfxLen >= endSuffix.length then
-      let potentialSuffix := afterPfx.drop (afterPfxLen - endSuffix.length)
-      if potentialSuffix == endSuffix then
-        let label := afterPfx.take (afterPfxLen - endSuffix.length)
-        some label
-      else none
+    if afterPfx.endsWith endSuffix then
+      let label := (afterPfx.dropEnd endSuffix.length).toString
+      some label
     else none
   else none
 
 /-- Check if a line is an END marker for the given label.
     Expects format: "-----END <label>-----" -/
 private def isEndMarker (line : String) (label : String) : Bool :=
-  let trimmed := line.trim
+  let trimmed := line.trimAscii.toString
   trimmed == s!"-----END {label}-----"
 
 /-- Parse a PEM-formatted string that may contain multiple blocks.
@@ -263,14 +256,14 @@ def runTests : IO Bool := do
     IO.println s!"    FAILED (expected 1 block, got {blocks.size})"
     allPassed := false
   else
-    let block := blocks.get! 0
+    let block := blocks[0]!
     if block.label != "CERTIFICATE" then
       IO.println s!"    FAILED (expected label CERTIFICATE, got {block.label})"
       allPassed := false
     else if block.data.size == 0 then
       IO.println "    FAILED (data is empty)"
       allPassed := false
-    else if block.data.get! 0 != 0x30 then
+    else if block.data[0]! != 0x30 then
       IO.println s!"    FAILED (expected first byte 0x30)"
       allPassed := false
     else
@@ -287,10 +280,10 @@ def runTests : IO Bool := do
     allPassed := false
   else
     -- Both should start with 0x30 (ASN.1 SEQUENCE tag)
-    let cert0 := certs.get! 0
-    let cert1 := certs.get! 1
-    let cert0Ok := cert0.get! 0 == 0x30
-    let cert1Ok := cert1.get! 0 == 0x30
+    let cert0 := certs[0]!
+    let cert1 := certs[1]!
+    let cert0Ok := cert0[0]! == 0x30
+    let cert1Ok := cert1[0]! == 0x30
     if cert0Ok && cert1Ok then
       IO.println "    PASSED"
     else

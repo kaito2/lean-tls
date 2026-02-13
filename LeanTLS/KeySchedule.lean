@@ -33,7 +33,7 @@ private def aes128IVLen : Nat := 12
 
 /-- 32 zero bytes, used as IKM when no PSK or as the zero input. -/
 private def zeroKey : ByteArray :=
-  ByteArray.mk (Array.mkArray hashLen 0)
+  ByteArray.mk (Array.replicate hashLen 0)
 
 -- ============================================================================
 -- Section 2: HKDF-Expand-Label (RFC 8446 Section 7.1)
@@ -48,7 +48,7 @@ private def zeroKey : ByteArray :=
 def hkdfExpandLabel (secret : ByteArray) (label : String) (context : ByteArray) (length : Nat) : ByteArray :=
   let fullLabel := ("tls13 " ++ label).toUTF8
   -- Build HkdfLabel
-  let hkdfLabel := ByteArray.mkEmpty (2 + 1 + fullLabel.size + 1 + context.size)
+  let hkdfLabel := ByteArray.emptyWithCapacity (2 + 1 + fullLabel.size + 1 + context.size)
   -- uint16 length (big-endian)
   let hkdfLabel := hkdfLabel.push (length / 256).toUInt8
   let hkdfLabel := hkdfLabel.push (length % 256).toUInt8
@@ -181,12 +181,12 @@ private def aes256KeyLen : Nat := 32
 
 /-- 48 zero bytes, used as IKM when no PSK or as the zero input for SHA-384. -/
 private def zeroKey384 : ByteArray :=
-  ByteArray.mk (Array.mkArray hashLen384 0)
+  ByteArray.mk (Array.replicate hashLen384 0)
 
 /-- HKDF-Expand-Label using SHA-384. -/
 def hkdfExpandLabelSHA384 (secret : ByteArray) (label : String) (context : ByteArray) (length : Nat) : ByteArray :=
   let fullLabel := ("tls13 " ++ label).toUTF8
-  let hkdfLabel := ByteArray.mkEmpty (2 + 1 + fullLabel.size + 1 + context.size)
+  let hkdfLabel := ByteArray.emptyWithCapacity (2 + 1 + fullLabel.size + 1 + context.size)
   let hkdfLabel := hkdfLabel.push (length / 256).toUInt8
   let hkdfLabel := hkdfLabel.push (length % 256).toUInt8
   let hkdfLabel := hkdfLabel.push fullLabel.size.toUInt8

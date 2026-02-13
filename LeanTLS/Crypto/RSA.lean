@@ -116,7 +116,7 @@ def mgf1SHA256 (seed : ByteArray) (maskLen : Nat) : ByteArray :=
     shorter length. -/
 def xorByteArrays (a b : ByteArray) : ByteArray :=
   let len := Nat.min a.size b.size
-  Nat.fold (n := len) (init := ByteArray.mkEmpty len) fun i _ acc =>
+  Nat.fold (n := len) (init := ByteArray.emptyWithCapacity len) fun i _ acc =>
     acc.push ((a.get! i) ^^^ (b.get! i))
 
 -- ============================================================================
@@ -192,7 +192,7 @@ def emsaPSSVerify (mHash : ByteArray) (em : ByteArray) (emBits : Nat)
   let salt := db.extract (db.size - sLen) db.size
 
   -- Step 12: Construct M' = (0x)00 00 00 00 00 00 00 00 || mHash || salt
-  let mPrime := ByteArray.mk (Array.mkArray 8 (0x00 : UInt8)) ++ mHash ++ salt
+  let mPrime := ByteArray.mk (Array.replicate 8 (0x00 : UInt8)) ++ mHash ++ salt
 
   -- Step 13: Compute H' = SHA-256(M')
   let hPrime := LeanTLS.Crypto.SHA256.hash mPrime

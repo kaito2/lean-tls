@@ -37,7 +37,7 @@ def extract (salt : ByteArray) (ikm : ByteArray) : ByteArray :=
   let effectiveSalt :=
     if salt.size == 0 then
       -- Use a string of 32 zero bytes when salt is empty
-      Nat.fold (n := hashLen) (init := ByteArray.mkEmpty hashLen) fun _ _ acc =>
+      Nat.fold (n := hashLen) (init := ByteArray.emptyWithCapacity hashLen) fun _ _ acc =>
         acc.push 0x00
     else
       salt
@@ -61,7 +61,7 @@ def expand (prk : ByteArray) (info : ByteArray) (length : Nat) : ByteArray :=
   -- N = ceil(L / hashLen)
   let n := (length + hashLen - 1) / hashLen
   -- Iteratively compute T(1), T(2), ..., T(N), concatenating results
-  let (okm, _) := Nat.fold (n := n) (init := (ByteArray.mkEmpty (n * hashLen), ByteArray.empty))
+  let (okm, _) := Nat.fold (n := n) (init := (ByteArray.emptyWithCapacity (n * hashLen), ByteArray.empty))
     fun i _ (acc, tPrev) =>
       -- Counter byte: i is 0-based from Nat.fold, RFC uses 1-based
       let counter : UInt8 := (i + 1).toUInt8
@@ -70,7 +70,7 @@ def expand (prk : ByteArray) (info : ByteArray) (length : Nat) : ByteArray :=
       let ti := LeanTLS.Crypto.HMAC.hmacSHA256 prk input
       (acc ++ ti, ti)
   -- Truncate to desired length
-  ByteArray.copySlice okm 0 (ByteArray.mkEmpty length) 0 length
+  ByteArray.copySlice okm 0 (ByteArray.emptyWithCapacity length) 0 length
 
 -- ============================================================================
 -- Section 4: Constants (SHA-384)
@@ -92,7 +92,7 @@ def extractSHA384 (salt : ByteArray) (ikm : ByteArray) : ByteArray :=
   let effectiveSalt :=
     if salt.size == 0 then
       -- Use a string of 48 zero bytes when salt is empty
-      Nat.fold (n := hashLen384) (init := ByteArray.mkEmpty hashLen384) fun _ _ acc =>
+      Nat.fold (n := hashLen384) (init := ByteArray.emptyWithCapacity hashLen384) fun _ _ acc =>
         acc.push 0x00
     else
       salt
@@ -115,7 +115,7 @@ def expandSHA384 (prk : ByteArray) (info : ByteArray) (length : Nat) : ByteArray
   -- N = ceil(L / hashLen384)
   let n := (length + hashLen384 - 1) / hashLen384
   -- Iteratively compute T(1), T(2), ..., T(N), concatenating results
-  let (okm, _) := Nat.fold (n := n) (init := (ByteArray.mkEmpty (n * hashLen384), ByteArray.empty))
+  let (okm, _) := Nat.fold (n := n) (init := (ByteArray.emptyWithCapacity (n * hashLen384), ByteArray.empty))
     fun i _ (acc, tPrev) =>
       -- Counter byte: i is 0-based from Nat.fold, RFC uses 1-based
       let counter : UInt8 := (i + 1).toUInt8
@@ -124,7 +124,7 @@ def expandSHA384 (prk : ByteArray) (info : ByteArray) (length : Nat) : ByteArray
       let ti := LeanTLS.Crypto.HMAC.hmacSHA384 prk input
       (acc ++ ti, ti)
   -- Truncate to desired length
-  ByteArray.copySlice okm 0 (ByteArray.mkEmpty length) 0 length
+  ByteArray.copySlice okm 0 (ByteArray.emptyWithCapacity length) 0 length
 
 -- ============================================================================
 -- Section 7: Test vectors (RFC 5869 Appendix A)

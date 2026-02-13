@@ -153,13 +153,13 @@ def pad (msg : ByteArray) : ByteArray := Id.run do
 
 /-- Compute the 80-entry message schedule W from a 128-byte block. -/
 private def messageSchedule (block : ByteArray) (blockOffset : Nat) : Array Nat := Id.run do
-  let mut w : Array Nat := Array.mkArray 80 0
+  let mut w : Array Nat := Array.replicate 80 0
   for i in [:16] do
     w := w.set! i (getWord64BE block (blockOffset + i * 8))
   for t in [16:80] do
-    let s1 := smallSigma1 (w.get! (t - 2))
-    let s0 := smallSigma0 (w.get! (t - 15))
-    w := w.set! t (add64 (add64 s1 (w.get! (t - 7))) (add64 s0 (w.get! (t - 16))))
+    let s1 := smallSigma1 (w[t - 2]!)
+    let s0 := smallSigma0 (w[t - 15]!)
+    w := w.set! t (add64 (add64 s1 (w[t - 7]!)) (add64 s0 (w[t - 16]!)))
   return w
 
 -- ============================================================================
@@ -195,18 +195,18 @@ private def processBlock (hashState : Array Nat) (paddedMsg : ByteArray) (blockO
     : Array Nat := Id.run do
   let w := messageSchedule paddedMsg blockOffset
   let mut state : WorkState := {
-    a := hashState.get! 0, b := hashState.get! 1,
-    c := hashState.get! 2, d := hashState.get! 3,
-    e := hashState.get! 4, f := hashState.get! 5,
-    g := hashState.get! 6, h := hashState.get! 7
+    a := hashState[0]!, b := hashState[1]!,
+    c := hashState[2]!, d := hashState[3]!,
+    e := hashState[4]!, f := hashState[5]!,
+    g := hashState[6]!, h := hashState[7]!
   }
   for t in [:80] do
-    state := compressionRound state (add64 (K.get! t) (w.get! t))
+    state := compressionRound state (add64 (K[t]!) (w[t]!))
   return #[
-    add64 (hashState.get! 0) state.a, add64 (hashState.get! 1) state.b,
-    add64 (hashState.get! 2) state.c, add64 (hashState.get! 3) state.d,
-    add64 (hashState.get! 4) state.e, add64 (hashState.get! 5) state.f,
-    add64 (hashState.get! 6) state.g, add64 (hashState.get! 7) state.h
+    add64 (hashState[0]!) state.a, add64 (hashState[1]!) state.b,
+    add64 (hashState[2]!) state.c, add64 (hashState[3]!) state.d,
+    add64 (hashState[4]!) state.e, add64 (hashState[5]!) state.f,
+    add64 (hashState[6]!) state.g, add64 (hashState[7]!) state.h
   ]
 
 -- ============================================================================
@@ -224,7 +224,7 @@ def hash (data : ByteArray) : ByteArray := Id.run do
   -- Output only the first 6 words (48 bytes = 384 bits)
   let mut result := ByteArray.empty
   for i in [:6] do
-    result := result ++ putWord64BE (state.get! i)
+    result := result ++ putWord64BE (state[i]!)
   return result
 
 -- ============================================================================

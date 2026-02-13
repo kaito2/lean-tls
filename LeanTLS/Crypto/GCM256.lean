@@ -21,7 +21,7 @@ namespace LeanTLS.Crypto.GCM256
 /-- XOR two ByteArrays of equal length. If lengths differ, XOR up to the shorter length. -/
 private def xorBytes (a : ByteArray) (b : ByteArray) : ByteArray := Id.run do
   let len := min a.size b.size
-  let mut result := ByteArray.mkEmpty len
+  let mut result := ByteArray.emptyWithCapacity len
   for i in [:len] do
     -- Safe: i < len = min a.size b.size, so i < a.size and i < b.size
     result := result.push (a.get! i ^^^ b.get! i)
@@ -29,7 +29,7 @@ private def xorBytes (a : ByteArray) (b : ByteArray) : ByteArray := Id.run do
 
 /-- Create a ByteArray of n zero bytes. -/
 private def zeroBlock (n : Nat) : ByteArray :=
-  Nat.fold (n := n) (init := ByteArray.mkEmpty n) fun _ _ acc => acc.push 0
+  Nat.fold (n := n) (init := ByteArray.emptyWithCapacity n) fun _ _ acc => acc.push 0
 
 /-- Increment the rightmost 32 bits (bytes 12-15) of a 16-byte block in big-endian. -/
 private def incrCounter (block : ByteArray) : ByteArray := Id.run do
@@ -65,7 +65,7 @@ def encrypt (key : ByteArray) (iv : ByteArray) (plaintext : ByteArray) (aad : By
   let h := LeanTLS.Crypto.AES.encryptBlock256 expandedKey (zeroBlock 16)
 
   -- J0 = IV || 0x00000001 (for 96-bit IV)
-  let mut j0 := ByteArray.mkEmpty 16
+  let mut j0 := ByteArray.emptyWithCapacity 16
   for i in [:12] do
     -- Safe: iv is 12 bytes; i ranges over [0, 12)
     j0 := j0.push (iv.get! i)
@@ -79,7 +79,7 @@ def encrypt (key : ByteArray) (iv : ByteArray) (plaintext : ByteArray) (aad : By
 
   -- Counter mode encryption
   let mut counter := j0
-  let mut ciphertext := ByteArray.mkEmpty plaintext.size
+  let mut ciphertext := ByteArray.emptyWithCapacity plaintext.size
   let fullBlocks := plaintext.size / 16
   let remainder := plaintext.size % 16
 
@@ -122,7 +122,7 @@ def decrypt (key : ByteArray) (iv : ByteArray) (ciphertext : ByteArray) (aad : B
   let h := LeanTLS.Crypto.AES.encryptBlock256 expandedKey (zeroBlock 16)
 
   -- J0 = IV || 0x00000001 (for 96-bit IV)
-  let mut j0 := ByteArray.mkEmpty 16
+  let mut j0 := ByteArray.emptyWithCapacity 16
   for i in [:12] do
     -- Safe: iv is 12 bytes; i ranges over [0, 12)
     j0 := j0.push (iv.get! i)
@@ -146,7 +146,7 @@ def decrypt (key : ByteArray) (iv : ByteArray) (ciphertext : ByteArray) (aad : B
 
   -- Counter mode decryption (same as encryption since XOR is symmetric)
   let mut counter := j0
-  let mut plaintext := ByteArray.mkEmpty ciphertext.size
+  let mut plaintext := ByteArray.emptyWithCapacity ciphertext.size
   let fullBlocks := ciphertext.size / 16
   let remainder := ciphertext.size % 16
 

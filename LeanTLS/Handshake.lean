@@ -437,9 +437,9 @@ def runTests : IO Bool := do
   -- --------------------------------------------------------------------------
   IO.println "  Handshake test 2 (ClientHello construction):"
   -- Use deterministic random and public key for testing
-  let testRandom := ByteArray.mk (Array.mkArray 32 0xAA)
-  let testSessionId := ByteArray.mk (Array.mkArray 32 0xBB)
-  let testPubKey := ByteArray.mk (Array.mkArray 32 0xCC)
+  let testRandom := ByteArray.mk (Array.replicate 32 0xAA)
+  let testSessionId := ByteArray.mk (Array.replicate 32 0xBB)
+  let testPubKey := ByteArray.mk (Array.replicate 32 0xCC)
   let chParams : ClientHelloParams := { random := testRandom, sessionId := testSessionId }
   let chBytes := buildClientHello chParams testPubKey
 
@@ -567,7 +567,7 @@ def runTests : IO Bool := do
     allPassed := false
 
   -- Verify with wrong data should return false
-  let wrongVd := ByteArray.mk (Array.mkArray 32 0xFF)
+  let wrongVd := ByteArray.mk (Array.replicate 32 0xFF)
   let verifyBad := verifyFinished finKey trHash wrongVd
   if !verifyBad then
     IO.println "    verifyFinished (wrong data): OK"

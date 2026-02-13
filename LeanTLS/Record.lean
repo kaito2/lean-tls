@@ -72,7 +72,7 @@ def maxEncryptedFragmentLength : Nat := 16384 + 256
     - N bytes: fragment -/
 def TLSRecord.encode (rec : TLSRecord) : ByteArray := Id.run do
   let len := rec.fragment.size
-  let mut result := ByteArray.mkEmpty (5 + len)
+  let mut result := ByteArray.emptyWithCapacity (5 + len)
   -- Content type (1 byte)
   result := result.push rec.contentType.toByte
   -- Legacy version (2 bytes, big-endian)
@@ -151,9 +151,9 @@ def buildNonce (iv : ByteArray) (seqNum : UInt64) : ByteArray := Id.run do
   -- Guard: IV must be exactly 12 bytes
   if iv.size != 12 then
     -- Return zero nonce as fallback (should never happen with correct key material)
-    return ByteArray.mk (Array.mkArray 12 0)
+    return ByteArray.mk (Array.replicate 12 0)
   -- Build a 12-byte padded sequence number (4 zero bytes + 8 bytes big-endian)
-  let mut paddedSeq := ByteArray.mkEmpty 12
+  let mut paddedSeq := ByteArray.emptyWithCapacity 12
   -- 4 bytes of zero padding
   for _ in [:4] do
     paddedSeq := paddedSeq.push 0
@@ -168,7 +168,7 @@ def buildNonce (iv : ByteArray) (seqNum : UInt64) : ByteArray := Id.run do
   paddedSeq := paddedSeq.push seqNum.toUInt8
   -- XOR with IV
   -- Safety: both iv and paddedSeq are exactly 12 bytes, so indices 0..11 are in bounds
-  let mut nonce := ByteArray.mkEmpty 12
+  let mut nonce := ByteArray.emptyWithCapacity 12
   for i in [:12] do
     nonce := nonce.push (iv.get! i ^^^ paddedSeq.get! i)
   return nonce
@@ -177,7 +177,7 @@ def buildNonce (iv : ByteArray) (seqNum : UInt64) : ByteArray := Id.run do
     The outer content type is always applicationData (23), the version is 0x0303,
     and the length is the ciphertext + tag length. -/
 private def buildEncryptedRecordHeader (encryptedLen : Nat) : ByteArray := Id.run do
-  let mut header := ByteArray.mkEmpty 5
+  let mut header := ByteArray.emptyWithCapacity 5
   -- Content type: applicationData (23)
   header := header.push ContentType.applicationData.toByte
   -- Legacy version: 0x0303

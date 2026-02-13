@@ -24,12 +24,12 @@ where
 
 /-- Convert a single byte to a two-character lowercase hex string. -/
 def byteToHex (b : UInt8) : String :=
-  let hexChars := "0123456789abcdef"
+  let hexChars := "0123456789abcdef".toList.toArray
   let hi := (b >>> 4).toNat
   let lo := (b &&& 0x0f).toNat
-  let hiC := hexChars.get! ⟨hi⟩
-  let loC := hexChars.get! ⟨lo⟩
-  String.mk [hiC, loC]
+  let hiC := hexChars[hi]!
+  let loC := hexChars[lo]!
+  String.ofList [hiC, loC]
 
 /-- Convert a ByteArray to a lowercase hex string. -/
 def bytesToHex (bs : ByteArray) : String :=

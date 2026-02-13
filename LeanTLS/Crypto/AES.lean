@@ -211,7 +211,7 @@ private def setWord (expanded : Array UInt8) (i : Nat) (w : Array UInt8) : Array
 -- All .get!/.set! indices are within the 176-byte expanded array and 16-byte key
 private def keyExpansion (key : ByteArray) : Array UInt8 := Id.run do
   -- Initialize with 176 zero bytes
-  let mut expanded : Array UInt8 := Array.mkArray 176 0
+  let mut expanded : Array UInt8 := Array.replicate 176 0
   -- Copy the original key into the first 4 words (16 bytes)
   for i in [:16] do
     -- Safe: key is 16 bytes; i ranges over [0, 16)
@@ -261,7 +261,7 @@ def encryptBlock (key : ByteArray) (plaintext : ByteArray) : ByteArray := Id.run
 -- All .get!/.set! indices are within the 240-byte expanded array and 32-byte key
 def keyExpansion256 (key : ByteArray) : ByteArray := Id.run do
   -- Initialize with 240 zero bytes (60 words * 4 bytes)
-  let mut expanded : Array UInt8 := Array.mkArray 240 0
+  let mut expanded : Array UInt8 := Array.replicate 240 0
   -- Copy the original key into the first 8 words (32 bytes)
   for i in [:32] do
     -- Safe: key is 32 bytes; i ranges over [0, 32)

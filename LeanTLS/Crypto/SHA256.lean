@@ -148,9 +148,9 @@ def messageSchedule (block : ByteArray) (blockOffset : Nat) : Array UInt32 :=
   -- Safe: acc grows from 16 to 64 entries; t-2, t-7, t-15, t-16 are all >= 0
   let w := Nat.fold (n := 48) (init := w) fun i _ acc =>
     let t := i + 16
-    let s1 := smallSigma1 (acc.get! (t - 2))
-    let s0 := smallSigma0 (acc.get! (t - 15))
-    let wt := s1 + acc.get! (t - 7) + s0 + acc.get! (t - 16)
+    let s1 := smallSigma1 (acc[t - 2]!)
+    let s0 := smallSigma0 (acc[t - 15]!)
+    let wt := s1 + acc[t - 7]! + s0 + acc[t - 16]!
     acc.push wt
   w
 
@@ -188,26 +188,26 @@ def processBlock (hashState : Array UInt32) (paddedMsg : ByteArray) (blockOffset
   let w := messageSchedule paddedMsg blockOffset
   -- Safe: hashState always has exactly 8 elements (initialized from H0)
   let initState : WorkState :=
-    { a := hashState.get! 0
-      b := hashState.get! 1
-      c := hashState.get! 2
-      d := hashState.get! 3
-      e := hashState.get! 4
-      f := hashState.get! 5
-      g := hashState.get! 6
-      h := hashState.get! 7 }
+    { a := hashState[0]!
+      b := hashState[1]!
+      c := hashState[2]!
+      d := hashState[3]!
+      e := hashState[4]!
+      f := hashState[5]!
+      g := hashState[6]!
+      h := hashState[7]! }
   -- Safe: K has 64 entries, w has 64 entries, t ranges over [0, 64)
   let finalState := Nat.fold (n := 64) (init := initState) fun t _ acc =>
-    compressionRound acc (K.get! t) (w.get! t)
+    compressionRound acc (K[t]!) (w[t]!)
   -- Safe: hashState always has 8 elements
-  #[ hashState.get! 0 + finalState.a,
-     hashState.get! 1 + finalState.b,
-     hashState.get! 2 + finalState.c,
-     hashState.get! 3 + finalState.d,
-     hashState.get! 4 + finalState.e,
-     hashState.get! 5 + finalState.f,
-     hashState.get! 6 + finalState.g,
-     hashState.get! 7 + finalState.h ]
+  #[ hashState[0]! + finalState.a,
+     hashState[1]! + finalState.b,
+     hashState[2]! + finalState.c,
+     hashState[3]! + finalState.d,
+     hashState[4]! + finalState.e,
+     hashState[5]! + finalState.f,
+     hashState[6]! + finalState.g,
+     hashState[7]! + finalState.h ]
 
 -- ============================================================================
 -- Section 7: Main hash function
@@ -222,7 +222,7 @@ def hash (msg : ByteArray) : ByteArray :=
     processBlock acc padded (i * 64)
   -- Safe: finalHash always has 8 entries (invariant of processBlock)
   let result := Nat.fold (n := 8) (init := ByteArray.empty) fun i _ acc =>
-    acc ++ putUInt32BE (finalHash.get! i)
+    acc ++ putUInt32BE (finalHash[i]!)
   result
 
 -- ============================================================================

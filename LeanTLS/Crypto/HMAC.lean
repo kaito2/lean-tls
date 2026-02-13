@@ -61,7 +61,7 @@ private def prepareKey (key : ByteArray) : ByteArray :=
 /-- XOR each byte of a ByteArray with a constant byte. -/
 -- Safe: i ranges over [0, ba.size); .get! i is always in bounds
 private def xorWithByte (ba : ByteArray) (b : UInt8) : ByteArray :=
-  let result := Nat.fold (n := ba.size) (init := ByteArray.mkEmpty ba.size) fun i _ acc =>
+  let result := Nat.fold (n := ba.size) (init := ByteArray.emptyWithCapacity ba.size) fun i _ acc =>
     acc.push ((ba.get! i) ^^^ b)
   result
 
@@ -113,7 +113,7 @@ private def prepareKey384 (key : ByteArray) : ByteArray :=
 /-- XOR each byte of a ByteArray with a constant byte. -/
 -- Safe: i ranges over [0, ba.size); .get! i is always in bounds
 private def xorWithByte384 (ba : ByteArray) (b : UInt8) : ByteArray :=
-  let result := Nat.fold (n := ba.size) (init := ByteArray.mkEmpty ba.size) fun i _ acc =>
+  let result := Nat.fold (n := ba.size) (init := ByteArray.emptyWithCapacity ba.size) fun i _ acc =>
     acc.push ((ba.get! i) ^^^ b)
   result
 

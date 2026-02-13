@@ -69,7 +69,7 @@ def parseKeyUpdate (payload : ByteArray) : Option KeyUpdateRequest :=
 /-- Serialize a KeyUpdate message as a complete handshake message.
     Total output: 5 bytes (4-byte header + 1-byte payload). -/
 def buildKeyUpdateMessage (request : KeyUpdateRequest) : ByteArray := Id.run do
-  let mut msg := ByteArray.mkEmpty 5
+  let mut msg := ByteArray.emptyWithCapacity 5
   msg := msg.push keyUpdateHandshakeType
   msg := msg.push 0x00
   msg := msg.push 0x00
@@ -92,7 +92,7 @@ def updateTrafficSecret (currentSecret : ByteArray) : ByteArray :=
       HKDF-Expand-Label(application_traffic_secret_N, "traffic upd", "", 48) -/
 def updateTrafficSecretSHA384 (currentSecret : ByteArray) : ByteArray :=
   let fullLabel := ("tls13 " ++ "traffic upd").toUTF8
-  let hkdfLabel := ByteArray.mkEmpty (2 + 1 + fullLabel.size + 1)
+  let hkdfLabel := ByteArray.emptyWithCapacity (2 + 1 + fullLabel.size + 1)
   let hkdfLabel := hkdfLabel.push (48 / 256).toUInt8
   let hkdfLabel := hkdfLabel.push (48 % 256).toUInt8
   let hkdfLabel := hkdfLabel.push fullLabel.size.toUInt8
@@ -107,7 +107,7 @@ def updateTrafficSecretSHA384 (currentSecret : ByteArray) : ByteArray :=
 /-- Helper: HKDF-Expand-Label for SHA-384. -/
 private def hkdfExpandLabelSHA384 (secret : ByteArray) (label : String) (context : ByteArray) (length : Nat) : ByteArray :=
   let fullLabel := ("tls13 " ++ label).toUTF8
-  let hkdfLabel := ByteArray.mkEmpty (2 + 1 + fullLabel.size + 1 + context.size)
+  let hkdfLabel := ByteArray.emptyWithCapacity (2 + 1 + fullLabel.size + 1 + context.size)
   let hkdfLabel := hkdfLabel.push (length / 256).toUInt8
   let hkdfLabel := hkdfLabel.push (length % 256).toUInt8
   let hkdfLabel := hkdfLabel.push fullLabel.size.toUInt8

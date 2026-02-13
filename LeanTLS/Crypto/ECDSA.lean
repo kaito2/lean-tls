@@ -253,25 +253,25 @@ def ecdsaVerify (qx qy : Nat) (messageHash : ByteArray) (r s : Nat) : Bool :=
     Uses `LeanTLS.ASN1.parseAll` for DER parsing. -/
 partial def parseECDSASignature (sig : ByteArray) : Option (Nat × Nat) := do
   let node ← LeanTLS.ASN1.parseAll sig
-  let tag := node.getTag
+  let tag := LeanTLS.ASN1.ASN1Node.getTag node
   -- Must be a SEQUENCE (universal constructed, tag number 0x10 = 16)
-  if tag.tagClass != LeanTLS.ASN1.TagClass.universal then none
-  else if tag.tagNumber != 0x10 then none
-  else if tag.encoding != LeanTLS.ASN1.Encoding.constructed then none
+  if LeanTLS.ASN1.Tag.tagClass tag != LeanTLS.ASN1.TagClass.universal then none
+  else if LeanTLS.ASN1.Tag.tagNumber tag != 0x10 then none
+  else if LeanTLS.ASN1.Tag.encoding tag != LeanTLS.ASN1.Encoding.constructed then none
   else
-    let children := node.getChildren
+    let children := LeanTLS.ASN1.ASN1Node.getChildren node
     if children.size != 2 then none
     else
-      let child0 := children.get! 0
-      let child1 := children.get! 1
-      let tag0 := child0.getTag
-      let tag1 := child1.getTag
+      let child0 := children[0]!
+      let child1 := children[1]!
+      let tag0 := LeanTLS.ASN1.ASN1Node.getTag child0
+      let tag1 := LeanTLS.ASN1.ASN1Node.getTag child1
       -- Both children must be INTEGER (universal primitive, tag number 2)
-      if tag0.tagClass != LeanTLS.ASN1.TagClass.universal || tag0.tagNumber != 2 then none
-      else if tag1.tagClass != LeanTLS.ASN1.TagClass.universal || tag1.tagNumber != 2 then none
+      if LeanTLS.ASN1.Tag.tagClass tag0 != LeanTLS.ASN1.TagClass.universal || LeanTLS.ASN1.Tag.tagNumber tag0 != 2 then none
+      else if LeanTLS.ASN1.Tag.tagClass tag1 != LeanTLS.ASN1.TagClass.universal || LeanTLS.ASN1.Tag.tagNumber tag1 != 2 then none
       else
-        let r := LeanTLS.ASN1.parseInteger child0.getValue
-        let s := LeanTLS.ASN1.parseInteger child1.getValue
+        let r := LeanTLS.ASN1.parseInteger (LeanTLS.ASN1.ASN1Node.getValue child0)
+        let s := LeanTLS.ASN1.parseInteger (LeanTLS.ASN1.ASN1Node.getValue child1)
         some (r, s)
 
 -- ============================================================================

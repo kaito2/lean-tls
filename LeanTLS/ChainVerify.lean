@@ -78,7 +78,7 @@ def rsaPKCS1v15Verify (modulus : Nat) (exponent : Nat) (message : ByteArray)
         let psLen := emLen - tLen - 3
         let expected :=
           ByteArray.mk #[0x00, 0x01] ++
-          ByteArray.mk (Array.mkArray psLen (0xFF : UInt8)) ++
+          ByteArray.mk (Array.replicate psLen (0xFF : UInt8)) ++
           ByteArray.mk #[0x00] ++
           digestInfo
         LeanTLS.Utils.constantTimeEq em expected
@@ -161,7 +161,7 @@ where
       : TlsResult (Array LeanTLS.X509.X509Certificate) :=
     if idx >= derCerts.size then .ok acc
     else
-      match LeanTLS.X509.parseX509 (derCerts.get! idx) with
+      match LeanTLS.X509.parseX509 (derCerts[idx]!) with
       | some cert => parseAllCerts derCerts (idx + 1) (acc.push cert)
       | none => .error (.certificateError s!"failed to parse certificate at index {idx}")
   termination_by derCerts.size - idx
@@ -170,7 +170,7 @@ where
       (trustedCerts : Array LeanTLS.X509.X509Certificate)
       (currentTime : Option LeanTLS.ASN1.DateTime) : TlsResult Unit := do
     verifyChainLinks certs 0 currentTime
-    let lastCert := certs.get! (certs.size - 1)
+    let lastCert := certs[certs.size - 1]!
     match currentTime with
     | some time =>
       if !LeanTLS.X509.isValidAt lastCert time then
@@ -188,8 +188,8 @@ where
     if certs.size == 0 then .ok ()
     else if idx >= certs.size - 1 then .ok ()
     else
-      let child := certs.get! idx
-      let parent := certs.get! (idx + 1)
+      let child := certs[idx]!
+      let parent := certs[idx + 1]!
       if child.issuerDN != parent.subjectDN then
         .error (.certificateError s!"certificate chain: issuerDN of cert[{idx}] does not match subjectDN of cert[{idx + 1}]")
       else do
@@ -282,7 +282,7 @@ def runTests : IO Bool := do
     tbsCertificateDER := ByteArray.mk #[0x30, 0x00]
     signatureAlgorithm := oidSha256WithRSAEncryption
     signatureValue := ByteArray.empty
-    publicKey := .ec (ByteArray.mk (Array.mkArray 65 (0x04 : UInt8)))
+    publicKey := .ec (ByteArray.mk (Array.replicate 65 (0x04 : UInt8)))
     subjectAltNames := #[]
     commonName := some "parent"
   }
@@ -348,7 +348,7 @@ def runTests : IO Bool := do
 
   -- Test 7: rsaPKCS1v15Verify basic sanity (wrong signature returns false)
   IO.println "  ChainVerify test 7 (rsaPKCS1v15Verify rejects garbage):"
-  let garbageSig := ByteArray.mk (Array.mkArray 128 (0xAB : UInt8))
+  let garbageSig := ByteArray.mk (Array.replicate 128 (0xAB : UInt8))
   let result := rsaPKCS1v15Verify 3 65537 (ByteArray.mk #[0x01, 0x02, 0x03]) garbageSig
   if !result then
     IO.println "    PASSED (garbage signature rejected)"

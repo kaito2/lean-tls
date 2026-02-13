@@ -113,7 +113,7 @@ def parseCertificateVerifyMessage (payload : ByteArray) : Option CertificateVeri
       64 × 0x20 (space) + "TLS 1.3, server CertificateVerify" + 0x00 + transcript_hash
     Total: 64 + 33 + 1 + 32 = 130 bytes -/
 def buildCertificateVerifyContent (transcriptHash : ByteArray) : ByteArray :=
-  let spaces := ByteArray.mk (Array.mkArray 64 (0x20 : UInt8))
+  let spaces := ByteArray.mk (Array.replicate 64 (0x20 : UInt8))
   let context := "TLS 1.3, server CertificateVerify".toUTF8
   let separator := ByteArray.mk #[0x00]
   spaces ++ context ++ separator ++ transcriptHash
@@ -233,7 +233,7 @@ def verifyCertificate
     .error (.certificateError "server sent empty certificate chain")
   else
     -- Parse the leaf certificate (first in chain)
-    let leafDer := certMsg.certificates.get! 0
+    let leafDer := certMsg.certificates[0]!
     let leafCert ← match LeanTLS.X509.parseX509 leafDer with
       | some cert => .ok cert
       | none => .error (.certificateError "failed to parse leaf X.509 certificate")
@@ -261,7 +261,7 @@ def runTests : IO Bool := do
   -- Test 1: buildCertificateVerifyContent
   -- --------------------------------------------------------------------------
   IO.println "  CertVerify test 1 (buildCertificateVerifyContent):"
-  let dummyHash := ByteArray.mk (Array.mkArray 32 (0xAA : UInt8))
+  let dummyHash := ByteArray.mk (Array.replicate 32 (0xAA : UInt8))
   let content := buildCertificateVerifyContent dummyHash
   -- Should be 64 + 33 + 1 + 32 = 130 bytes
   if content.size != 130 then
@@ -387,7 +387,7 @@ def runTests : IO Bool := do
   let certMsgPayload := ByteArray.mk #[0x00] ++ certListLen ++ certEntry
   match parseCertificateMessage certMsgPayload with
   | some msg =>
-    if msg.certificates.size == 1 && msg.certificates.get! 0 == certEntryData then
+    if msg.certificates.size == 1 && msg.certificates[0]! == certEntryData then
       IO.println "    PASSED"
     else
       IO.println s!"    FAILED (numCerts={msg.certificates.size})"

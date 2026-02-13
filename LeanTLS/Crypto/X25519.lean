@@ -113,9 +113,9 @@ def clamp (k : ByteArray) : ByteArray :=
   if k.size < 32 then k
   else
     -- Safe: k.size >= 32 is guaranteed by the guard above; indices 0, 31 are in bounds
-    let k := k.set! 0 (k.get! 0 &&& 248)
-    let k := k.set! 31 (k.get! 31 &&& 127)
-    let k := k.set! 31 (k.get! 31 ||| 64)
+    let k := k.set! 0 (k[0]! &&& 248)
+    let k := k.set! 31 (k[31]! &&& 127)
+    let k := k.set! 31 (k[31]! ||| 64)
     k
 
 -- ============================================================================
@@ -128,7 +128,7 @@ def decodeUCoordinate (bs : ByteArray) : Nat :=
   if bs.size < 32 then decodeLE bs
   else
     -- Safe: bs.size >= 32 is guaranteed by the guard above; index 31 is in bounds
-    let bs' := bs.set! 31 (bs.get! 31 &&& 127)
+    let bs' := bs.set! 31 (bs[31]! &&& 127)
     decodeLE bs'
 
 -- ============================================================================
@@ -205,7 +205,7 @@ def x25519 (k : ByteArray) (u : ByteArray) : ByteArray :=
 
 /-- The standard base point (u = 9) encoded as 32 little-endian bytes. -/
 def basePoint : ByteArray :=
-  let bs := ByteArray.mkEmpty 32
+  let bs := ByteArray.emptyWithCapacity 32
   let bs := bs.push 9
   let rec pad (i : Nat) (acc : ByteArray) : ByteArray :=
     if i < 31 then pad (i + 1) (acc.push 0)

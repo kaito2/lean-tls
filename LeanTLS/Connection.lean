@@ -414,10 +414,10 @@ def connect (stream : IOStream) (hostname : String) (config : TlsConfig := {}) :
   if handshakeMsgBytes.size < 4 then
     throwTlsError (.handshakeFailure "did not receive all expected handshake messages")
 
-  let eeRaw := handshakeMsgBytes.get! 0
-  let certRaw := handshakeMsgBytes.get! 1
-  let cvRaw := handshakeMsgBytes.get! 2
-  let finRaw := handshakeMsgBytes.get! 3
+  let eeRaw := handshakeMsgBytes[0]!
+  let certRaw := handshakeMsgBytes[1]!
+  let cvRaw := handshakeMsgBytes[2]!
+  let finRaw := handshakeMsgBytes[3]!
 
   -- Validate minimum handshake message size (4-byte header)
   if eeRaw.size < 4 then
