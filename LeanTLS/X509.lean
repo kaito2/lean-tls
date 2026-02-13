@@ -28,15 +28,37 @@ structure RSAPublicKey where
   modulus : Nat    -- n
   exponent : Nat   -- e (typically 65537)
 
+/-- Sum type for public keys extracted from X.509 certificates. -/
+inductive PublicKey where
+  | rsa : RSAPublicKey → PublicKey
+  | ec : ByteArray → PublicKey  -- raw uncompressed EC point (65 bytes for P-256)
+  | unknown : PublicKey
+
+instance : Inhabited PublicKey where
+  default := .unknown
 
 /-- Parsed X.509 certificate (subset relevant for TLS verification). -/
 structure X509Certificate where
   tbsCertificateDER : ByteArray        -- Raw DER bytes for signature verification
   signatureAlgorithm : Array Nat       -- OID components
   signatureValue : ByteArray           -- Raw signature bytes (BIT STRING content without unused-bits byte)
-  publicKey : RSAPublicKey             -- Extracted RSA public key
+  publicKey : PublicKey                -- Extracted public key (RSA, EC, or unknown)
   subjectAltNames : Array String       -- DNS names from SAN extension
   commonName : Option String           -- CN from Subject
+  notBefore : Option LeanTLS.ASN1.DateTime := none
+  notAfter : Option LeanTLS.ASN1.DateTime := none
+  issuerDN : ByteArray := ByteArray.empty   -- Raw DER bytes of the Issuer Name sequence
+  subjectDN : ByteArray := ByteArray.empty  -- Raw DER bytes of the Subject Name sequence
+
+instance : Inhabited X509Certificate where
+  default := {
+    tbsCertificateDER := ByteArray.empty
+    signatureAlgorithm := #[]
+    signatureValue := ByteArray.empty
+    publicKey := .unknown
+    subjectAltNames := #[]
+    commonName := none
+  }
 
 -- ============================================================================
 -- Section 2: Helpers
@@ -94,13 +116,15 @@ def parseRSAPublicKey (bitStringContent : ByteArray) : Option RSAPublicKey := do
 -- Section 4: SubjectPublicKeyInfo Parsing
 -- ============================================================================
 
-/-- Parse SubjectPublicKeyInfo to extract the RSA public key.
+/-- Parse SubjectPublicKeyInfo to extract the public key (RSA or EC).
     SubjectPublicKeyInfo ::= SEQUENCE {
       algorithm  AlgorithmIdentifier,  -- SEQUENCE { OID, NULL or params }
       subjectPublicKey BIT STRING
     }
+    For RSA: OID 1.2.840.113549.1.1.1 (rsaEncryption), BIT STRING contains DER-encoded RSA key
+    For EC:  OID 1.2.840.10045.2.1 (id-ecPublicKey), params = namedCurve OID, BIT STRING contains EC point
 -/
-def parseSubjectPublicKeyInfo (node : ASN1.ASN1Node) : Option RSAPublicKey := do
+def parseSubjectPublicKeyInfo (node : ASN1.ASN1Node) : Option PublicKey := do
   let children := node.getChildren
   if children.size < 2 then none
   else
@@ -115,15 +139,26 @@ def parseSubjectPublicKeyInfo (node : ASN1.ASN1Node) : Option RSAPublicKey := do
       if oidTag.tagNumber != 6 || oidTag.tagClass != .universal then none
       else
         let oid ← ASN1.parseOID oidNode.getValue
-        -- Verify it is rsaEncryption
-        if !ASN1.oidEq oid ASN1.oidRsaEncryption then none
+        -- Second child: BIT STRING containing the public key
+        let pubKeyBitString := children.get! 1
+        let bsTag := pubKeyBitString.getTag
+        if bsTag.tagNumber != 3 || bsTag.tagClass != .universal then none
         else
-          -- Second child: BIT STRING containing the RSA public key
-          let pubKeyBitString := children.get! 1
-          let bsTag := pubKeyBitString.getTag
-          if bsTag.tagNumber != 3 || bsTag.tagClass != .universal then none
+          if ASN1.oidEq oid ASN1.oidRsaEncryption then
+            -- RSA public key
+            let rsaKey ← parseRSAPublicKey pubKeyBitString.getValue
+            some (.rsa rsaKey)
+          else if ASN1.oidEq oid ASN1.oidEcPublicKey then
+            -- EC public key: BIT STRING value = unused-bits byte (0x00) + EC point
+            let bsValue := pubKeyBitString.getValue
+            if bsValue.size < 2 then none
+            else
+              if bsValue.get! 0 != 0x00 then none
+              else
+                let ecPoint := bsValue.extract 1 bsValue.size
+                some (.ec ecPoint)
           else
-            parseRSAPublicKey pubKeyBitString.getValue
+            some .unknown
 
 -- ============================================================================
 -- Section 5: Subject Common Name Extraction
@@ -230,7 +265,73 @@ def parseSAN (extensionsNode : ASN1.ASN1Node) : Array String :=
   goExt 0 #[]
 
 -- ============================================================================
--- Section 7: Main Certificate Parser
+-- Section 7: Validity Period Parsing
+-- ============================================================================
+
+/-- Parse a single ASN.1 time node (UTCTime tag 0x17 or GeneralizedTime tag 0x18). -/
+private def parseTimeNode (node : ASN1.ASN1Node) : Option ASN1.DateTime :=
+  let tag := node.getTag
+  if tag.tagClass != .universal then none
+  else if tag.tagNumber == 0x17 then
+    ASN1.parseUTCTime node.getValue
+  else if tag.tagNumber == 0x18 then
+    ASN1.parseGeneralizedTime node.getValue
+  else none
+
+/-- Parse the Validity SEQUENCE (notBefore, notAfter) from a TBS certificate ASN1 node. -/
+def parseValidity (tbsNode : LeanTLS.ASN1.ASN1Node) (hasVersion : Bool) : Option (LeanTLS.ASN1.DateTime × LeanTLS.ASN1.DateTime) := do
+  let tbsChildren := tbsNode.getChildren
+  let offset := if hasVersion then 1 else 0
+  let validityIdx := offset + 3
+  if tbsChildren.size <= validityIdx then none
+  else
+    let validityNode := tbsChildren.get! validityIdx
+    let validityChildren := validityNode.getChildren
+    if validityChildren.size < 2 then none
+    else
+      let notBefore ← parseTimeNode (validityChildren.get! 0)
+      let notAfter ← parseTimeNode (validityChildren.get! 1)
+      some (notBefore, notAfter)
+
+/-- Check if a certificate is valid at the given time. -/
+def isValidAt (cert : X509Certificate) (now : LeanTLS.ASN1.DateTime) : Bool :=
+  match cert.notBefore, cert.notAfter with
+  | some nb, some na => ASN1.dateTimeLe nb now && ASN1.dateTimeLe now na
+  | _, _ => false
+
+-- ============================================================================
+-- Section 8: Raw DER Field Extraction Helper
+-- ============================================================================
+
+/-- Walk through children of a constructed SEQUENCE in raw DER bytes,
+    skipping `remaining` children and then returning the raw TLV bytes of
+    the next child. -/
+private def extractChildDERAux (seqDER : ByteArray) (pos : Nat) (endPos : Nat)
+    (remaining : Nat) : Option ByteArray :=
+  if pos >= endPos then none
+  else
+    match ASN1.parseTLV seqDER pos with
+    | none => none
+    | some (_, childEnd) =>
+      if childEnd > endPos then none
+      else if remaining == 0 then some (seqDER.extract pos childEnd)
+      else if childEnd ≤ pos then none  -- guard against non-progress
+      else extractChildDERAux seqDER childEnd endPos (remaining - 1)
+termination_by (endPos - pos, remaining)
+
+/-- Extract the raw DER bytes of a specific child TLV element within a
+    constructed SEQUENCE given its raw DER bytes. Walks through children
+    from the beginning to find the `idx`-th child, returning its full
+    TLV bytes (tag + length + value). -/
+private def extractChildDER (seqDER : ByteArray) (idx : Nat) : Option ByteArray :=
+  match parseTagAndLength seqDER 0 with
+  | none => none
+  | some (_, valueStart, valueLen) =>
+    let valueEnd := valueStart + valueLen
+    extractChildDERAux seqDER valueStart valueEnd idx
+
+-- ============================================================================
+-- Section 9: Main Certificate Parser
 -- ============================================================================
 
 /-- Parse a DER-encoded X.509 certificate.
@@ -327,6 +428,21 @@ def parseX509 (der : ByteArray) : Option X509Certificate := do
                     else #[]
                   else #[]
 
+                -- Extract validity dates
+                let (notBefore, notAfter) :=
+                  match parseValidity tbsNode hasVersion with
+                  | some (nb, na) => (some nb, some na)
+                  | none => (none, none)
+
+                -- Extract raw DER bytes for Issuer and Subject Name sequences
+                let issuerIdx := offset + 2
+                let issuerDN := match extractChildDER tbsCertificateDER issuerIdx with
+                  | some bytes => bytes
+                  | none => ByteArray.empty
+                let subjectDN := match extractChildDER tbsCertificateDER subjectIdx with
+                  | some bytes => bytes
+                  | none => ByteArray.empty
+
                 some {
                   tbsCertificateDER := tbsCertificateDER
                   signatureAlgorithm := signatureAlgorithm
@@ -334,10 +450,14 @@ def parseX509 (der : ByteArray) : Option X509Certificate := do
                   publicKey := publicKey
                   subjectAltNames := subjectAltNames
                   commonName := commonName
+                  notBefore := notBefore
+                  notAfter := notAfter
+                  issuerDN := issuerDN
+                  subjectDN := subjectDN
                 }
 
 -- ============================================================================
--- Section 8: Tests
+-- Section 10: Tests
 -- ============================================================================
 
 /-- Run all X509 module tests. Returns `true` if all tests pass. -/
@@ -381,20 +501,25 @@ def runTests : IO Bool := do
       IO.println "    SAN: FAILED (subjectAltNames is empty)"
       allPassed := false
 
-    -- Check exponent
-    if cert.publicKey.exponent == 65537 then
-      IO.println "    Exponent = 65537: PASSED"
-    else
-      IO.println s!"    Exponent: FAILED (expected 65537, got {cert.publicKey.exponent})"
-      allPassed := false
+    -- Check public key (RSA with expected exponent and modulus prefix)
+    match cert.publicKey with
+    | .rsa rsaKey =>
+      if rsaKey.exponent == 65537 then
+        IO.println "    Exponent = 65537: PASSED"
+      else
+        IO.println s!"    Exponent: FAILED (expected 65537, got {rsaKey.exponent})"
+        allPassed := false
 
-    -- Check modulus hex starts with "ca18de9a"
-    let modBytes := LeanTLS.Utils.bytesToHex (LeanTLS.Utils.hexToBytes "ca18de9a")
-    let modHex := modulusToHex cert.publicKey.modulus
-    if modHex.take 8 == modBytes then
-      IO.println "    Modulus starts with ca18de9a: PASSED"
-    else
-      IO.println s!"    Modulus: FAILED (expected prefix 'ca18de9a', got '{modHex.take 8}')"
+      -- Check modulus hex starts with "ca18de9a"
+      let modBytes := LeanTLS.Utils.bytesToHex (LeanTLS.Utils.hexToBytes "ca18de9a")
+      let modHex := modulusToHex rsaKey.modulus
+      if modHex.take 8 == modBytes then
+        IO.println "    Modulus starts with ca18de9a: PASSED"
+      else
+        IO.println s!"    Modulus: FAILED (expected prefix 'ca18de9a', got '{modHex.take 8}')"
+        allPassed := false
+    | _ =>
+      IO.println "    PublicKey: FAILED (expected RSA key)"
       allPassed := false
 
     -- Check signature algorithm OID
@@ -429,6 +554,43 @@ def runTests : IO Bool := do
       | none =>
         IO.println "    FAILED (tbsCertificateDER is not valid ASN.1)"
         allPassed := false
+
+  -- --------------------------------------------------------------------------
+  -- Test 3: Validity period parsing from mozilla.org certificate
+  -- --------------------------------------------------------------------------
+  IO.println "  X509 test 3 (validity period parsing):"
+  match parseX509 certDer with
+  | none =>
+    IO.println "    FAILED (parseX509 returned none)"
+    allPassed := false
+  | some cert =>
+    match cert.notBefore, cert.notAfter with
+    | some nb, some na =>
+      -- The mozilla.org cert has notBefore: 260211115904Z and notAfter: 260512125237Z
+      -- Verify they parsed as valid DateTimes with reasonable years
+      if nb.year >= 2020 && nb.year <= 2030 && na.year >= 2020 && na.year <= 2030 then
+        IO.println s!"    notBefore: {nb.year}-{nb.month}-{nb.day} {nb.hour}:{nb.minute}:{nb.second}: PASSED"
+        IO.println s!"    notAfter:  {na.year}-{na.month}-{na.day} {na.hour}:{na.minute}:{na.second}: PASSED"
+        -- Test isValidAt: a date between notBefore and notAfter should be valid
+        let midDate : ASN1.DateTime := { year := 2026, month := 3, day := 15, hour := 12, minute := 0, second := 0 }
+        if isValidAt cert midDate then
+          IO.println "    isValidAt (2026-03-15, within range): PASSED"
+        else
+          IO.println "    isValidAt (2026-03-15, within range): FAILED"
+          allPassed := false
+        -- A date far in the future should not be valid
+        let futureDate : ASN1.DateTime := { year := 2030, month := 1, day := 1, hour := 0, minute := 0, second := 0 }
+        if !isValidAt cert futureDate then
+          IO.println "    isValidAt (2030-01-01, outside range): PASSED"
+        else
+          IO.println "    isValidAt (2030-01-01, outside range): FAILED"
+          allPassed := false
+      else
+        IO.println s!"    FAILED (unexpected years: notBefore.year={nb.year}, notAfter.year={na.year})"
+        allPassed := false
+    | _, _ =>
+      IO.println "    FAILED (notBefore or notAfter is none)"
+      allPassed := false
 
   if allPassed then
     IO.println "  All X509 tests passed."

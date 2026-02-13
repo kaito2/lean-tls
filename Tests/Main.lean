@@ -1,6 +1,7 @@
 import LeanTLS
 
 def main : IO Unit := do
+  IO.println "Starting..."
   let mut allOk := true
 
   IO.println "Running AES-128 tests..."
@@ -15,7 +16,7 @@ def main : IO Unit := do
   let x25519Ok ← LeanTLS.Crypto.X25519.runTests
   if !x25519Ok then allOk := false
 
-  IO.println "Running HMAC-SHA-256 tests..."
+  IO.println "Running HMAC tests..."
   let hmacOk ← LeanTLS.Crypto.HMAC.runTests
   if !hmacOk then allOk := false
 
@@ -54,6 +55,24 @@ def main : IO Unit := do
   IO.println "Running CertVerify tests..."
   let cvOk ← LeanTLS.CertVerify.runTests
   if !cvOk then allOk := false
+
+  IO.println "Running ECDSA P-256 tests..."
+  let ecdsaOk ← LeanTLS.Crypto.ECDSA.runTests
+  if !ecdsaOk then allOk := false
+
+  IO.println "Running SHA-384 tests..."
+  let sha384Ok ← LeanTLS.Crypto.SHA384.runTests
+  if !sha384Ok then allOk := false
+
+  IO.println "Running PEM tests..."
+  let pemOk ← LeanTLS.PEM.runTests
+  if !pemOk then allOk := false
+
+  IO.println "Running AES-256-GCM tests..."
+  let gcm256Ok ← LeanTLS.Crypto.GCM256.runTests
+  if !gcm256Ok then allOk := false
+
+  -- CAStore tests run separately (not included here to keep test binary simple)
 
   if allOk then
     IO.println "All tests passed!"

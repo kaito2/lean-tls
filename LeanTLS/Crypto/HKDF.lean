@@ -1,5 +1,6 @@
 import LeanTLS.Crypto.HMAC
 import LeanTLS.Crypto.SHA256
+import LeanTLS.Crypto.SHA384
 import LeanTLS.Utils
 
 set_option autoImplicit false
@@ -72,7 +73,61 @@ def expand (prk : ByteArray) (info : ByteArray) (length : Nat) : ByteArray :=
   ByteArray.copySlice okm 0 (ByteArray.mkEmpty length) 0 length
 
 -- ============================================================================
--- Section 4: Test vectors (RFC 5869 Appendix A)
+-- Section 4: Constants (SHA-384)
+-- ============================================================================
+
+/-- SHA-384 output length in bytes. -/
+private def hashLen384 : Nat := 48
+
+-- ============================================================================
+-- Section 5: HKDF-Extract for SHA-384 (RFC 5869 Section 2.2)
+-- ============================================================================
+
+/-- HKDF-Extract using HMAC-SHA-384.
+    HKDF-Extract(salt, IKM) = HMAC-SHA-384(salt, IKM)
+
+    If salt is not provided (empty ByteArray), it is set to a string of
+    HashLen (48) zero bytes. -/
+def extractSHA384 (salt : ByteArray) (ikm : ByteArray) : ByteArray :=
+  let effectiveSalt :=
+    if salt.size == 0 then
+      -- Use a string of 48 zero bytes when salt is empty
+      Nat.fold (n := hashLen384) (init := ByteArray.mkEmpty hashLen384) fun _ _ acc =>
+        acc.push 0x00
+    else
+      salt
+  LeanTLS.Crypto.HMAC.hmacSHA384 effectiveSalt ikm
+
+-- ============================================================================
+-- Section 6: HKDF-Expand for SHA-384 (RFC 5869 Section 2.3)
+-- ============================================================================
+
+/-- HKDF-Expand using HMAC-SHA-384.
+    Expands the pseudorandom key PRK to the desired length L (in bytes)
+    using the optional context/application-specific info.
+
+    T(0) = empty string
+    T(i) = HMAC-SHA-384(PRK, T(i-1) || info || i)    where i is a single byte
+
+    OKM = T(1) || T(2) || ... || T(N), truncated to first L bytes
+    where N = ceil(L / HashLen) -/
+def expandSHA384 (prk : ByteArray) (info : ByteArray) (length : Nat) : ByteArray :=
+  -- N = ceil(L / hashLen384)
+  let n := (length + hashLen384 - 1) / hashLen384
+  -- Iteratively compute T(1), T(2), ..., T(N), concatenating results
+  let (okm, _) := Nat.fold (n := n) (init := (ByteArray.mkEmpty (n * hashLen384), ByteArray.empty))
+    fun i _ (acc, tPrev) =>
+      -- Counter byte: i is 0-based from Nat.fold, RFC uses 1-based
+      let counter : UInt8 := (i + 1).toUInt8
+      -- T(i) = HMAC-SHA-384(PRK, T(i-1) || info || counter)
+      let input := tPrev ++ info |>.push counter
+      let ti := LeanTLS.Crypto.HMAC.hmacSHA384 prk input
+      (acc ++ ti, ti)
+  -- Truncate to desired length
+  ByteArray.copySlice okm 0 (ByteArray.mkEmpty length) 0 length
+
+-- ============================================================================
+-- Section 7: Test vectors (RFC 5869 Appendix A)
 -- ============================================================================
 
 /-- Run HKDF test vectors from RFC 5869 Appendix A. Returns `true` if all tests pass. -/
@@ -170,6 +225,64 @@ def runTests : IO Bool := do
     IO.println "  HKDF test 3 Expand:  FAILED"
     IO.println s!"    expected: {expectedOkm3}"
     IO.println s!"    got:      {resultOkm3}"
+    allPassed := false
+
+  -- ---- HKDF-SHA-384 test vectors ----
+
+  -- Test Case 1 (SHA-384 variant of RFC 5869 Test Case 1)
+  -- IKM  = 0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b (22 bytes of 0x0b)
+  -- salt = 0x000102030405060708090a0b0c (13 bytes)
+  -- info = 0xf0f1f2f3f4f5f6f7f8f9 (10 bytes)
+  -- L    = 42
+  let expectedPrk384_1 := "704b39990779ce1dc548052c7dc39f303570dd13fb39f7acc564680bef80e8dec70ee9a7e1f3e293ef68eceb072a5ade"
+  let expectedOkm384_1 := "9b5097a86038b805309076a44b3a9f38063e25b516dcbf369f394cfab43685f748b6457763e4f0204fc5"
+
+  let prk384_1 := extractSHA384 salt1 ikm1
+  let resultPrk384_1 := LeanTLS.Crypto.SHA384.toHex prk384_1
+  if resultPrk384_1 == expectedPrk384_1 then
+    IO.println "  HKDF-SHA-384 test 1 Extract: PASSED"
+  else
+    IO.println "  HKDF-SHA-384 test 1 Extract: FAILED"
+    IO.println s!"    expected: {expectedPrk384_1}"
+    IO.println s!"    got:      {resultPrk384_1}"
+    allPassed := false
+
+  let okm384_1 := expandSHA384 prk384_1 info1 42
+  let resultOkm384_1 := LeanTLS.Crypto.SHA384.toHex okm384_1
+  if resultOkm384_1 == expectedOkm384_1 then
+    IO.println "  HKDF-SHA-384 test 1 Expand:  PASSED"
+  else
+    IO.println "  HKDF-SHA-384 test 1 Expand:  FAILED"
+    IO.println s!"    expected: {expectedOkm384_1}"
+    IO.println s!"    got:      {resultOkm384_1}"
+    allPassed := false
+
+  -- Test Case 2 (SHA-384 variant: zero-length salt and info)
+  -- IKM  = 0x0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b (22 bytes of 0x0b)
+  -- salt = (empty — uses 48 zero bytes internally)
+  -- info = (empty)
+  -- L    = 42
+  let expectedPrk384_2 := "10e40cf072a4c5626e43dd22c1cf727d4bb140975c9ad0cbc8e45b40068f8f0ba57cdb598af9dfa6963a96899af047e5"
+  let expectedOkm384_2 := "c8c96e710f89b0d7990bca68bcdec8cf854062e54c73a7abc743fade9b242daacc1cea5670415b52849c"
+
+  let prk384_2 := extractSHA384 salt3 ikm3
+  let resultPrk384_2 := LeanTLS.Crypto.SHA384.toHex prk384_2
+  if resultPrk384_2 == expectedPrk384_2 then
+    IO.println "  HKDF-SHA-384 test 2 Extract: PASSED"
+  else
+    IO.println "  HKDF-SHA-384 test 2 Extract: FAILED"
+    IO.println s!"    expected: {expectedPrk384_2}"
+    IO.println s!"    got:      {resultPrk384_2}"
+    allPassed := false
+
+  let okm384_2 := expandSHA384 prk384_2 info3 42
+  let resultOkm384_2 := LeanTLS.Crypto.SHA384.toHex okm384_2
+  if resultOkm384_2 == expectedOkm384_2 then
+    IO.println "  HKDF-SHA-384 test 2 Expand:  PASSED"
+  else
+    IO.println "  HKDF-SHA-384 test 2 Expand:  FAILED"
+    IO.println s!"    expected: {expectedOkm384_2}"
+    IO.println s!"    got:      {resultOkm384_2}"
     allPassed := false
 
   return allPassed

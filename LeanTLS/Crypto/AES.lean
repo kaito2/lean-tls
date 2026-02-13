@@ -1,6 +1,6 @@
 /-
-  AES-128 Block Cipher (FIPS 197)
-  Encryption only: 128-bit key, 128-bit block, 10 rounds.
+  AES Block Cipher (FIPS 197)
+  Encryption only: AES-128 (128-bit key, 10 rounds) and AES-256 (256-bit key, 14 rounds).
 
   The state is a 4x4 byte matrix in column-major order as per FIPS 197.
   State indexing: state[row + 4 * col] for row in 0..3, col in 0..3.
@@ -251,13 +251,67 @@ def encryptBlock (key : ByteArray) (plaintext : ByteArray) : ByteArray := Id.run
   state := addRoundKey state expandedKey 10
   return state
 
+/-! ## AES-256 Key Expansion (FIPS 197, Section 5.2)
+
+  AES-256: Nk = 8 (key length in 32-bit words), Nr = 14, total words = 4 * (14 + 1) = 60.
+  The key expansion for Nk = 8 has an extra SubWord step when i % Nk == 4.
+-/
+
+/-- Expand a 32-byte AES-256 key into 60 words (240 bytes). -/
+-- All .get!/.set! indices are within the 240-byte expanded array and 32-byte key
+def keyExpansion256 (key : ByteArray) : ByteArray := Id.run do
+  -- Initialize with 240 zero bytes (60 words * 4 bytes)
+  let mut expanded : Array UInt8 := Array.mkArray 240 0
+  -- Copy the original key into the first 8 words (32 bytes)
+  for i in [:32] do
+    -- Safe: key is 32 bytes; i ranges over [0, 32)
+    expanded := expanded.set! i (key.get! i)
+  -- Generate remaining 52 words (indices 8 through 59)
+  for i in [8:60] do
+    let mut temp := getWord expanded (i - 1)
+    if i % 8 == 0 then
+      temp := rotWord temp
+      temp := subWord temp
+      -- Safe: rcon has 10 entries; i/8 ranges from 1 to 7, so (i/8)-1 in [0,6]
+      let rconWord : Array UInt8 := #[rcon[(i / 8) - 1]!, 0, 0, 0]
+      temp := xorWord temp rconWord
+    else if i % 8 == 4 then
+      -- Extra SubWord step for AES-256 when i % Nk == 4
+      temp := subWord temp
+    let prev := getWord expanded (i - 8)
+    let newWord := xorWord prev temp
+    expanded := setWord expanded i newWord
+  return ByteArray.mk expanded
+
+/-! ## AES-256 Encryption (FIPS 197, Section 5.1) -/
+
+/-- Encrypt a single 16-byte block with AES-256 (14 rounds).
+    Takes the pre-expanded key (240 bytes from keyExpansion256) and a 16-byte block. -/
+def encryptBlock256 (expanded : ByteArray) (block : ByteArray) : ByteArray := Id.run do
+  let expandedKey := expanded.data
+  -- Initial state = plaintext
+  let mut state := block
+  -- Initial round: AddRoundKey with round key 0
+  state := addRoundKey state expandedKey 0
+  -- Rounds 1 through 13: SubBytes, ShiftRows, MixColumns, AddRoundKey
+  for round in [1:14] do
+    state := subBytes state
+    state := shiftRows state
+    state := mixColumns state
+    state := addRoundKey state expandedKey round
+  -- Final round (round 14): SubBytes, ShiftRows, AddRoundKey (no MixColumns)
+  state := subBytes state
+  state := shiftRows state
+  state := addRoundKey state expandedKey 14
+  return state
+
 /-! ## Test Vectors -/
 
-/-- Run AES-128 test vectors. Returns true if all tests pass. -/
+/-- Run AES-128 and AES-256 test vectors. Returns true if all tests pass. -/
 def runTests : IO Bool := do
   let mut allPassed := true
 
-  -- Test 1: FIPS 197 Appendix B
+  -- AES-128 Test 1: FIPS 197 Appendix B
   let key1 := LeanTLS.Utils.hexToBytes "2b7e151628aed2a6abf7158809cf4f3c"
   let pt1 := LeanTLS.Utils.hexToBytes "3243f6a8885a308d313198a2e0370734"
   let expected1 := "3925841d02dc09fbdc118597196a0b32"
@@ -269,7 +323,7 @@ def runTests : IO Bool := do
     IO.println s!"[FAIL] FIPS 197 Appendix B: expected {expected1}, got {result1}"
     allPassed := false
 
-  -- Test 2: NIST AES-128 ECB (all zeros)
+  -- AES-128 Test 2: NIST AES-128 ECB (all zeros)
   let key2 := LeanTLS.Utils.hexToBytes "00000000000000000000000000000000"
   let pt2 := LeanTLS.Utils.hexToBytes "00000000000000000000000000000000"
   let expected2 := "66e94bd4ef8a2c3b884cfa59ca342b2e"
@@ -285,6 +339,24 @@ def runTests : IO Bool := do
     IO.println "All AES-128 tests passed!"
   else
     IO.println "Some AES-128 tests FAILED!"
+
+  -- AES-256 Test 1: FIPS 197 Appendix A.3
+  let key3 := LeanTLS.Utils.hexToBytes "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+  let pt3 := LeanTLS.Utils.hexToBytes "00112233445566778899aabbccddeeff"
+  let expected3 := "8ea2b7ca516745bfeafc49904b496089"
+  let expanded3 := keyExpansion256 key3
+  let ct3 := encryptBlock256 expanded3 pt3
+  let result3 := LeanTLS.Utils.bytesToHex ct3
+  if result3 == expected3 then
+    IO.println s!"[PASS] FIPS 197 Appendix A.3 (AES-256): {result3}"
+  else
+    IO.println s!"[FAIL] FIPS 197 Appendix A.3 (AES-256): expected {expected3}, got {result3}"
+    allPassed := false
+
+  if allPassed then
+    IO.println "All AES tests passed!"
+  else
+    IO.println "Some AES tests FAILED!"
 
   return allPassed
 

@@ -295,8 +295,84 @@ def oidSubjectAltName : Array Nat := #[2, 5, 29, 17]
 /-- OID for commonName: 2.5.4.3 -/
 def oidCommonName : Array Nat := #[2, 5, 4, 3]
 
+/-- OID for id-ecPublicKey: 1.2.840.10045.2.1 -/
+def oidEcPublicKey : Array Nat := #[1, 2, 840, 10045, 2, 1]
+
+/-- OID for secp256r1 (P-256): 1.2.840.10045.3.1.7 -/
+def oidSecp256r1 : Array Nat := #[1, 2, 840, 10045, 3, 1, 7]
+
 -- ============================================================================
--- Section 9: Tests
+-- Section 9: DateTime and Time Parsing
+-- ============================================================================
+
+/-- Represents a date-time as individual components. -/
+structure DateTime where
+  year : Nat
+  month : Nat
+  day : Nat
+  hour : Nat
+  minute : Nat
+  second : Nat
+  deriving BEq, Repr
+
+/-- Parse N ASCII digits from a ByteArray starting at position pos -/
+private def parseDigits (value : ByteArray) (pos : Nat) (count : Nat) : Option Nat :=
+  let rec go (i : Nat) (acc : Nat) : Option Nat :=
+    if i >= count then some acc
+    else
+      let idx := pos + i
+      if idx >= value.size then none
+      else
+        let b := value.get! idx
+        if b >= 0x30 && b <= 0x39 then
+          go (i + 1) (acc * 10 + (b - 0x30).toNat)
+        else none
+  termination_by count - i
+  go 0 0
+
+/-- Parse ASN.1 UTCTime (tag 0x17).
+    Format: YYMMDDHHMMSSZ
+    Years 00-49 → 2000-2049, 50-99 → 1950-1999 (RFC 5280) -/
+def parseUTCTime (value : ByteArray) : Option DateTime := do
+  -- UTCTime is 13 bytes: YYMMDDHHMMSSZ
+  if value.size != 13 then none
+  else if value.get! 12 != 0x5A then none  -- must end with 'Z'
+  else
+    let yy ← parseDigits value 0 2
+    let year := if yy < 50 then 2000 + yy else 1900 + yy
+    let month ← parseDigits value 2 2
+    let day ← parseDigits value 4 2
+    let hour ← parseDigits value 6 2
+    let minute ← parseDigits value 8 2
+    let second ← parseDigits value 10 2
+    some { year := year, month := month, day := day, hour := hour, minute := minute, second := second }
+
+/-- Parse ASN.1 GeneralizedTime (tag 0x18).
+    Format: YYYYMMDDHHMMSSZ -/
+def parseGeneralizedTime (value : ByteArray) : Option DateTime := do
+  -- GeneralizedTime is 15 bytes: YYYYMMDDHHMMSSZ
+  if value.size != 15 then none
+  else if value.get! 14 != 0x5A then none  -- must end with 'Z'
+  else
+    let year ← parseDigits value 0 4
+    let month ← parseDigits value 4 2
+    let day ← parseDigits value 6 2
+    let hour ← parseDigits value 8 2
+    let minute ← parseDigits value 10 2
+    let second ← parseDigits value 12 2
+    some { year := year, month := month, day := day, hour := hour, minute := minute, second := second }
+
+/-- Compare two DateTimes. Returns true if a ≤ b -/
+def dateTimeLe (a b : DateTime) : Bool :=
+  if a.year != b.year then a.year < b.year
+  else if a.month != b.month then a.month < b.month
+  else if a.day != b.day then a.day < b.day
+  else if a.hour != b.hour then a.hour < b.hour
+  else if a.minute != b.minute then a.minute < b.minute
+  else a.second <= b.second
+
+-- ============================================================================
+-- Section 10: Tests
 -- ============================================================================
 
 /-- Run all ASN1 module tests. Returns `true` if all tests pass. -/
@@ -458,6 +534,46 @@ def runTests : IO Bool := do
           allPassed := false
   | none =>
     IO.println "    FAILED (parseAll returned none)"
+    allPassed := false
+
+  -- --------------------------------------------------------------------------
+  -- Test 5: UTCTime parsing
+  -- --------------------------------------------------------------------------
+  IO.println "  ASN1 test 5 (UTCTime parsing):"
+  let utc1 := parseUTCTime "240101120000Z".toUTF8
+  let utc1Expected : DateTime := { year := 2024, month := 1, day := 1, hour := 12, minute := 0, second := 0 }
+  let utc2 := parseUTCTime "991231235959Z".toUTF8
+  let utc2Expected : DateTime := { year := 1999, month := 12, day := 31, hour := 23, minute := 59, second := 59 }
+  if utc1 == some utc1Expected && utc2 == some utc2Expected then
+    IO.println "    PASSED"
+  else
+    IO.println s!"    FAILED (utc1={repr utc1}, utc2={repr utc2})"
+    allPassed := false
+
+  -- --------------------------------------------------------------------------
+  -- Test 6: GeneralizedTime parsing
+  -- --------------------------------------------------------------------------
+  IO.println "  ASN1 test 6 (GeneralizedTime parsing):"
+  let gt1 := parseGeneralizedTime "20240101120000Z".toUTF8
+  let gt1Expected : DateTime := { year := 2024, month := 1, day := 1, hour := 12, minute := 0, second := 0 }
+  if gt1 == some gt1Expected then
+    IO.println "    PASSED"
+  else
+    IO.println s!"    FAILED (gt1={repr gt1})"
+    allPassed := false
+
+  -- --------------------------------------------------------------------------
+  -- Test 7: DateTime comparison
+  -- --------------------------------------------------------------------------
+  IO.println "  ASN1 test 7 (DateTime comparison):"
+  let dt2024 : DateTime := { year := 2024, month := 1, day := 1, hour := 0, minute := 0, second := 0 }
+  let dt2025 : DateTime := { year := 2025, month := 1, day := 1, hour := 0, minute := 0, second := 0 }
+  let cmp1 := dateTimeLe dt2024 dt2025  -- should be true
+  let cmp2 := dateTimeLe dt2025 dt2024  -- should be false
+  if cmp1 == true && cmp2 == false then
+    IO.println "    PASSED"
+  else
+    IO.println s!"    FAILED (2024<=2025={cmp1}, 2025<=2024={cmp2})"
     allPassed := false
 
   if allPassed then

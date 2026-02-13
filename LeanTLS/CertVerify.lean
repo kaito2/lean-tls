@@ -1,6 +1,7 @@
 import LeanTLS.X509
 import LeanTLS.Crypto.RSA
 import LeanTLS.Crypto.SHA256
+import LeanTLS.Crypto.ECDSA
 import LeanTLS.Handshake
 import LeanTLS.Errors
 import LeanTLS.Utils
@@ -13,8 +14,8 @@ namespace LeanTLS.CertVerify
 # TLS 1.3 Certificate Verification (RFC 8446 Section 4.4)
 
 Implements parsing of Certificate and CertificateVerify handshake messages,
-RSA-PSS signature verification of the server's CertificateVerify, and
-hostname matching against the server certificate's SAN/CN.
+RSA-PSS and ECDSA P-256 signature verification of the server's CertificateVerify,
+and hostname matching against the server certificate's SAN/CN.
 -/
 
 -- ============================================================================
@@ -122,23 +123,41 @@ def buildCertificateVerifyContent (transcriptHash : ByteArray) : ByteArray :=
 -- ============================================================================
 
 /-- Verify the CertificateVerify signature using the server's certificate.
-    Currently supports rsa_pss_rsae_sha256 (0x0804) only.
-    ECDSA (0x0403) returns an error. -/
+    Supports rsa_pss_rsae_sha256 (0x0804) and ecdsa_secp256r1_sha256 (0x0403). -/
 def verifyCertificateVerifySignature
     (leafCert : LeanTLS.X509.X509Certificate)
     (transcriptHash : ByteArray)
     (cvMsg : CertificateVerifyMessage) : TlsResult Bool :=
   if cvMsg.algorithm == 0x0804 then
     -- rsa_pss_rsae_sha256
-    let signedContent := buildCertificateVerifyContent transcriptHash
-    let result := LeanTLS.Crypto.RSA.rsassaPSSVerify
-      leafCert.publicKey.modulus
-      leafCert.publicKey.exponent
-      signedContent
-      cvMsg.signature
-    .ok result
+    match leafCert.publicKey with
+    | .rsa rsaKey =>
+      let signedContent := buildCertificateVerifyContent transcriptHash
+      let result := LeanTLS.Crypto.RSA.rsassaPSSVerify
+        rsaKey.modulus
+        rsaKey.exponent
+        signedContent
+        cvMsg.signature
+      .ok result
+    | _ => .error (.certificateError "certificate does not contain an RSA public key for RSA-PSS verification")
   else if cvMsg.algorithm == 0x0403 then
-    .error (.certificateError "ECDSA signature verification not yet implemented (algorithm 0x0403)")
+    -- ecdsa_secp256r1_sha256
+    match leafCert.publicKey with
+    | .ec ecPoint =>
+      let signedContent := buildCertificateVerifyContent transcriptHash
+      -- Hash the signed content with SHA-256
+      let messageHash := LeanTLS.Crypto.SHA256.hash signedContent
+      -- Parse the EC public key point
+      match LeanTLS.Crypto.ECDSA.parseECPublicKey ecPoint with
+      | some (qx, qy) =>
+        -- Parse the DER-encoded ECDSA signature
+        match LeanTLS.Crypto.ECDSA.parseECDSASignature cvMsg.signature with
+        | some (r, s) =>
+          let result := LeanTLS.Crypto.ECDSA.ecdsaVerify qx qy messageHash r s
+          .ok result
+        | none => .error (.certificateError "failed to parse ECDSA signature")
+      | none => .error (.certificateError "failed to parse EC public key point")
+    | _ => .error (.certificateError "certificate does not contain an EC public key for ECDSA verification")
   else
     .error (.certificateError s!"unsupported signature algorithm: 0x{sigAlgHex cvMsg.algorithm}")
 where
@@ -329,7 +348,7 @@ def runTests : IO Bool := do
     tbsCertificateDER := ByteArray.empty
     signatureAlgorithm := #[]
     signatureValue := ByteArray.empty
-    publicKey := { modulus := 0, exponent := 0 }
+    publicKey := .rsa { modulus := 0, exponent := 0 }
     subjectAltNames := #["example.com", "*.example.com"]
     commonName := some "Example Inc"
   }
